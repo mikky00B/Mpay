@@ -1,0 +1,40 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+
+# Database
+*.db
+*.sqlite3
+
+# Environment
+.env
+
+# Go
+watcher/mpay-watcher
+watcher/mpay-watcher.exe
+watcher/state.json
+watcher/build_out.txt
+
+# Smoke-test artifacts
+smoke.db
+smoke_state.json
+smoke_run.txt
+smoke_log.txt
+smoke_out.txt
+smoke_err.txt
+smoke_webhooks.txt
+api_stderr.txt
+api_err.txt
+api_out.txt
+watcher_stderr.txt
+diag.txt
+diag2.txt
+pip_pid.txt
+
+
+# OS / editor
+.DS_Store
+Thumbs.db

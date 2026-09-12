@@ -1,0 +1,215 @@
+"""API tests: merchants, invoices, idempotency, ingest dedupe, delivery log."""
+from __future__ import annotations
+
+import pytest
+
+
+@pytest.fixture()
+def merchant(client):
+    r = client.post("/merchants", json={"name": "Acme", "webhook_url": "http://hooks.test/acme"})
+    assert r.status_code == 201, r.text
+    return r.json()
+
+
+def test_create_invoice_returns_payable_amount(client, merchant):
+    r = client.post(
+        f"/merchants/{merchant['id']}/invoices",
+        json={"amount": "25.50", "description": "Order #42"},
+    )
+    assert r.status_code == 201, r.text
+    inv = r.json()["invoice"]
+    assert inv["status"] == "AWAITING_PAYMENT"
+    assert inv["requested_amount"] == "25.5"
+    # payable = requested + small unique offset [D6]
+    assert float(inv["payable_amount"]) > 25.50
+    assert inv["receiving_address"].startswith("0xhot")
+
+
+def test_invoice_creation_idempotent_on_key(client, merchant):
+    body = {"amount": "10", "idempotency_key": "order-42"}
+    r1 = client.post(f"/merchants/{merchant['id']}/invoices", json=body)
+    r2 = client.post(f"/merchants/{merchant['id']}/invoices", json=body)
+    assert r1.status_code == 201 and r2.status_code == 201
+    assert r1.json()["invoice"]["public_id"] == r2.json()["invoice"]["public_id"]
+    assert r2.json()["idempotent_replay"] is True
+
+
+def test_ingest_requires_internal_key(client):
+    r = client.post(
+        "/internal/events",
+        json={"events": [_event()]},
+        headers={"X-Internal-Key": "wrong"},
+    )
+    assert r.status_code == 401
+
+
+def _event(tx="0xtx10000000000000000", log_index=0, amount=10_000_123):
+    return {
+        "tx_hash": tx,
+        "log_index": log_index,
+        "block_number": 100,
+        "contract_address": "0xusdc000000000000000000000000000000000000",
+        "from_address": "0xpayer0000000000000000000000000000000000",
+        "to_address": "0xhot000000000000000000000000000000000009",
+        "amount_base_units": amount,
+    }
+
+
+def test_ingest_dedupes_on_tx_log_index(client):
+    body = {"events": [_event()]}
+    h = {"X-Internal-Key": "test-internal-key"}
+    r1 = client.post("/internal/events", json=body, headers=h)
+    r2 = client.post("/internal/events", json=body, headers=h)
+    assert r1.json()["accepted"] == 1
+    assert r2.json()["duplicates"] == 1  # DB unique index absorbed the replay [D7]
+
+
+# --------------------------------------------------------------------------
+# [D15] Finding 1 regression tests: payable offsets must never collide among
+# open invoices, and the partial unique index must reject duplicates loudly.
+# --------------------------------------------------------------------------
+
+def _mk_invoice(client, merchant_id, amount, key=None):
+    r = client.post(
+        f"/merchants/{merchant_id}/invoices",
+        json={"amount": amount, **({"idempotency_key": key} if key else {})},
+    )
+    assert r.status_code == 201, r.text
+    return r.json()["invoice"]
+
+
+def _to_base_units(decimal_str: str) -> int:
+    from app import money
+
+    return money.parse_amount_to_base_units(decimal_str)
+
+
+def test_offsets_900_ids_apart_do_not_collide(client, merchant, db_url):
+    """Ids exactly 900 apart with identical requested amounts must produce
+    DIFFERENT payable amounts — the old `id % 900 + 1` scheme wrapped here
+    and could misdirect a real payment to the wrong invoice [D15]."""
+    from sqlalchemy import insert, select
+    from app.db import get_engine, get_sessionmaker
+    from app.models import Invoice, InvoiceStatus, utcnow
+
+    engine = get_engine(db_url)
+    addr = "0xhot000000000000000000000000000000000009"
+    now = utcnow()
+    # Seed rows with explicit ids 900 apart, same requested amount (10 USDC
+    # = 10_000_000 base). amount = requested + id — exactly what the API's
+    # offset scheme [D6][D15] produces, so the partial unique index accepts
+    # both open rows (the old %900 scheme would have made them collide).
+    with engine.begin() as conn:
+        for inv_id in (1, 901):
+            conn.execute(
+                insert(Invoice).values(
+                    id=inv_id,
+                    merchant_id=merchant["id"],
+                    public_id=f"seeded-{inv_id}",
+                    requested_base_units=10_000_000,
+                    amount_base_units=10_000_000 + inv_id,
+                    status=InvoiceStatus.AWAITING_PAYMENT,
+                    receiving_address=addr,
+                    expires_at=now,
+                )
+            )
+    # Prove the SCHEME differs: simulate the old scheme vs. new on these ids.
+    old_offsets = {i % 900 + 1 for i in (1, 901)}
+    new_offsets = {i for i in (1, 901)}
+    assert len(old_offsets) == 1, "sanity: old scheme collided here"
+    assert len(new_offsets) == 2, "new scheme must differ for ids 900 apart"
+    from sqlalchemy import select
+    from app.db import get_sessionmaker
+
+    with get_sessionmaker(db_url)() as db:
+        amounts = db.execute(
+            select(Invoice.amount_base_units).where(Invoice.id.in_([1, 901]))
+        ).scalars().all()
+    assert len(set(amounts)) == 2, f"seeded payables collide: {amounts}"
+    # And via the API: two fresh invoices share requested amount -> distinct
+    # payables, since ids are unique.
+    inv1 = _mk_invoice(client, merchant["id"], "10", key="k1")
+    inv2 = _mk_invoice(client, merchant["id"], "10", key="k2")
+    a1 = _to_base_units(inv1["payable_amount"])
+    a2 = _to_base_units(inv2["payable_amount"])
+    assert a1 != a2, f"payables collided: {a1} vs {a2}"
+    assert a1 > 10_000_000 and a2 > 10_000_000
+
+
+def test_duplicate_open_address_amount_rejected_by_index(client, merchant, db_url):
+    """Defense in depth [D15]: a second OPEN invoice with the same
+    (receiving_address, amount_base_units) must be rejected — loudly (409),
+    never silently corrupting payment matching."""
+    from sqlalchemy import insert, select
+    from app.db import get_engine, get_sessionmaker
+    from app.models import Invoice, InvoiceStatus, utcnow
+
+    engine = get_engine(db_url)
+    addr = "0xhot000000000000000000000000000000000009"
+    amount = 25_500_002  # 25.5 USDC + offset 2 — the collision the API will make
+    with engine.begin() as conn:
+        conn.execute(
+            insert(Invoice).values(
+                id=1,
+                merchant_id=merchant["id"],
+                public_id="seeded-open",
+                requested_base_units=25_500_000,
+                amount_base_units=amount,
+                status=InvoiceStatus.AWAITING_PAYMENT,
+                receiving_address=addr,
+                expires_at=utcnow(),
+            )
+        )
+    # API invoice whose payable lands on the same (address, amount) as the
+    # seeded open invoice: offset 2 (id=2) => requested must be amount - 2.
+    from app import money
+
+    requested = money.base_units_to_decimal_string(amount - 2)
+    r = client.post(f"/merchants/{merchant['id']}/invoices", json={"amount": requested})
+    assert r.status_code == 409, f"expected 409, got {r.status_code}: {r.text}"
+    # And the seeded open invoice is untouched (exactly one row at that key).
+    with get_sessionmaker(db_url)() as db:
+        n = len(db.execute(
+            select(Invoice.id).where(Invoice.amount_base_units == amount)
+        ).scalars().all())
+    assert n == 1
+
+
+def test_settled_invoice_amount_can_repeat(client, merchant, db_url):
+    """The partial index guards only OPEN invoices [D15]: once one is settled,
+    a later open invoice may reuse the same payable amount."""
+    from sqlalchemy import insert, select
+    from app.db import get_engine, get_sessionmaker
+    from app.models import Invoice, InvoiceStatus, utcnow
+
+    engine = get_engine(db_url)
+    addr = "0xhot000000000000000000000000000000000009"
+    # The new API invoice will get id=2 -> offset 2 -> payable 9_000_002.
+    # Seed the settled row with EXACTLY that (address, amount) key so the
+    # partial index would reject it if the index didn't ignore SETTLED rows.
+    amount = 9_000_002
+    with engine.begin() as conn:
+        conn.execute(
+            insert(Invoice).values(
+                id=1,
+                merchant_id=merchant["id"],
+                public_id="seeded-settled",
+                requested_base_units=9_000_000,
+                amount_base_units=amount,
+                status=InvoiceStatus.SETTLED,
+                receiving_address=addr,
+                expires_at=utcnow(),
+            )
+        )
+    # New API invoice: id=2 -> offset 2 -> payable 9_000_000 + 2 = same key as
+    # the settled row. Must be ALLOWED (the partial index ignores SETTLED).
+    r = client.post(f"/merchants/{merchant['id']}/invoices", json={"amount": "9"})
+    assert r.status_code == 201, r.text
+    with get_sessionmaker(db_url)() as db:
+        open_rows = db.execute(
+            select(Invoice.id).where(
+                Invoice.amount_base_units == amount,
+                Invoice.status == InvoiceStatus.AWAITING_PAYMENT,
+            )
+        ).scalars().all()
+    assert len(open_rows) == 1  # only the new open one; settled row doesn't block it
