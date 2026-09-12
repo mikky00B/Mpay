@@ -38,3 +38,9 @@ pip_pid.txt
 # OS / editor
 .DS_Store
 Thumbs.db
+
+# Local-only docs: working notes, plans, and review notes kept out of the
+# published repo (owner decision).
+plan.md
+DECISIONS.md
+REVIEW_FINDINGS.md
