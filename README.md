@@ -1,245 +1,139 @@
-# Mpay — Crypto Payment Gateway (USDC / EVM)
+# Mpay
 
-A crypto payment gateway for **USDC on Ethereum (EVM)** — the
-Stripe-style invoice flow for on-chain money, without smart contracts.
+**A self-hostable crypto payment engine.** Mpay makes *"this invoice is paid"* a trustworthy, automatic statement — idempotent matching of on-chain transfers to invoices, an explicit payment state machine that understands confirmations instead of a boolean `paid` flag, and merchant webhooks that are cryptographically verifiable and retried until they land.
 
-Incoming USDC transfers are watched on-chain, matched to invoices, tracked
-through an explicit payment state machine, and surfaced to merchants via
-signed webhooks. The engineering story is **payments-infrastructure
-reliability**: idempotency, exactly-once event processing, confirmation
-depth, and retry-with-backoff delivery — the hard parts that make money
-movement trustworthy.
+v1 settles **USDC on Ethereum** (EVM). No smart contracts — Mpay consumes the chain, it doesn't extend it. Funds move payer-to-merchant directly on-chain; Mpay is the verification and notification layer, never a custodian.
 
-> **Status: v1 complete.** 21/21 tests pass; an end-to-end smoke test drives
-> a real API + real Go watcher against a mock chain and settles an invoice.
-> Next milestone: Sepolia testnet run with real USDC.
+## Why
 
----
+A static wallet address doesn't survive contact with real volume:
+
+| Static address | With Mpay |
+|---|---|
+| *"Which payment is this?"* — one address, ten clients, manual reconciliation | Every invoice carries a unique payable amount; incoming transfers are matched automatically and exactly-once |
+| Watching a block explorer by hand to release digital goods | Confirmation-depth tracking advances the invoice through its lifecycle and fires a webhook the moment it's trustworthy |
+| Fire-and-forget webhooks that lose orders when an endpoint hiccups | Every delivery attempt is logged, HMAC-signed, and retried with exponential backoff |
+| *"Paid"* is a guess when transactions sit unconfirmed or get orphaned | Payments are continuously re-verified against the chain; a reorged payment is detected, rolled back, and the merchant is notified |
+
+Mpay is the reliability core of a crypto invoicing platform — the part that isn't the checkout page.
+
+## How a payment flows
+
+```
+CREATED → AWAITING_PAYMENT → DETECTED → CONFIRMING → CONFIRMED → SETTLED
+                                  \                        │
+                                   (TTL expired)           (reorg detected)
+                                   ▼                       ▼
+                               EXPIRED ←────── AWAITING_PAYMENT (rollback)
+```
+
+1. **Invoice creation** — the API mints an invoice with a unique payable amount on the receiving address. Amount matching means no two open invoices are ever ambiguous.
+2. **Watch** — a standalone Go watcher tails `eth_getLogs` for USDC `Transfer` events to the hot address, checkpointed block-by-block, and ingests raw events through an internal API.
+3. **Process** — the event processor applies events exactly-once: dedup is enforced by a database-level `UNIQUE (tx_hash, log_index)` on both `chain_events` and `payments`, so a replayed event is structurally unrepresentable, not merely filtered.
+4. **Confirm** — a sweep advances invoices once the payment is `CONFIRMATION_THRESHOLD` blocks deep.
+5. **Notify** — the dispatcher delivers `invoice.confirmed` (HMAC-SHA256-signed, `X-Mpay-Signature` header). Successful delivery settles the invoice and fires `invoice.settled`.
+6. **Verify** — a reconciliation job continuously cross-checks the database against the chain: stuck notifications are rescued, dead processors are flagged, and payments that vanish from the chain inside the reorg-safety window are rolled back and the merchant told (`invoice.reorgged`).
 
 ## Architecture
 
 ```
-                    ┌────────────────────────────┐
-                    │   Merchant (your backend)  │
-                    │   - creates invoices       │
-                    │   - receives webhooks      │
-                    └───────┬────────────▲───────┘
-                            │ REST       │ HMAC-signed webhooks
-                            ▼            │
-   ┌─────────────────────────────────────────────────┐
-   │                Mpay API (Python)                │
-   │  FastAPI · SQLAlchemy 2.0 · PostgreSQL/SQLite   │
-   │                                                 │
-   │  Background loops (in-process):                 │
-   │   - event processor  (credits invoices)         │
-   │   - confirmation sweep (depth-based confirm)    │
-   │   - webhook dispatcher (backoff + retry)        │
-   └───────▲─────────────────────────────────────────┘
-           │ POST /internal/events   (shared-key guarded)
-           │ USDC Transfer events
-   ┌───────┴─────────────────────────────────────────┐
-   │            Chain watcher (Go)                   │
-   │  eth_getLogs → ingest, chunked, checkpointed    │
-   │  resumes exactly-once after crashes [D13]       │
-   └───────▲─────────────────────────────────────────┘
-           │ JSON-RPC (Alchemy / Infura / any node)
-   ┌───────┴─────────────────────────────────────────┐
-   │              Ethereum (EVM)                     │
-   │        USDC Transfer logs, hot wallet           │
-   └─────────────────────────────────────────────────┘
+Merchant backend ──REST──▶ Mpay API (FastAPI) ──webhooks──▶ Merchant backend
+                            │   SQLAlchemy 2.0 · SQLite/PostgreSQL
+                            │
+                            ├── event processor      (exactly-once credits)
+                            ├── confirmation sweep   (depth + TTL expiry)
+                            ├── webhook dispatcher   (backoff, audit log)
+                            └── reconciliation       (DB vs chain, reorgs)
+                                      ▲
+Go watcher (eth_getLogs, checkpointed) ── POST /internal/events ──┘
 ```
 
-Two services, deliberately split:
-
-- **`app/` — Python API** (FastAPI): merchants, invoices, state machine,
-  idempotent event processing, confirmations, webhooks. Background loops run
-  in-process for v1 (split into workers before real scale).
-- **`watcher/` — Go chain watcher**: a single binary that polls `eth_getLogs`
-  for USDC `Transfer` logs to the hot wallet, chunking both block ranges and
-  ingest batches, persisting a checkpoint file so it resumes crash-safely.
-
-### The invoice state machine
-
-Invoices are never a boolean `paid` — they move through explicit states with
-a single guarded transition point (`app/state_machine.py`):
-
-```
-CREATED → AWAITING_PAYMENT → CONFIRMING → CONFIRMED → SETTLED
-                        └──── EXPIRED (TTL passed, no payment)
-```
-
-(Payment detection transitions straight to `CONFIRMING` at v1's confirmation
-threshold; `DETECTED` is reserved for per-payment tracking.)
-
-### Payment matching [D6][D15]
-
-All invoices share one hot wallet address, so an incoming transfer is matched
-by **(address, amount)**: each invoice's `payable_amount` = requested + its
-unique per-invoice offset (the invoice id in base units), and a **partial
-unique index** guarantees no two open invoices can ever present the same
-`(address, amount)` key — collisions fail loudly at invoice creation (HTTP
-409) instead of corrupting matching silently.
-
-### Idempotency everywhere
-
-| Boundary | Mechanism |
-|---|---|
-| Invoice creation | `idempotency_key` per merchant → same invoice returned |
-| Event ingest | `UNIQUE (tx_hash, log_index)` — replays absorbed, never double-credited |
-| Processing | write-first raw events, single-writer processor [D5] |
-| Watcher resume | checkpoint advances only after a fully accepted scan window [D13][D16] |
-| Webhooks | every attempt logged with `attempt_no`, response code, retry state |
-
-### Webhooks [D8]
-
-Merchants register a webhook URL and receive `invoice.confirmed` /
-`invoice.settled` notifications signed with **HMAC-SHA256**
-(`X-Mpay-Signature` over the raw body, using the merchant's `whsec_…`
-secret, shown once at creation). Failed deliveries retry with **exponential
-backoff**; every attempt is queryable via the delivery log endpoint.
-
----
+The Go watcher is a separate process by design: it keeps writing events while the API is down, and its checkpoint only advances after successful ingest, so crashes resume exactly-once.
 
 ## Quickstart
 
-**Requirements:** Python 3.12+, Go 1.22+ (only if rebuilding the watcher).
+Requirements: Python 3.11+, Go 1.21+ (watcher), an EVM RPC endpoint.
 
 ```bash
-# 1. Python API
-python -m venv .venv
-.venv\Scripts\pip install -r requirements.txt      # Windows
-# source .venv/bin/activate && pip install -r requirements.txt  # POSIX
-
-# 2. Configure (see table below)
-copy .env.example .env   # or create .env manually
-
-# 3. Run the API (background loops start with it)
-.venv\Scripts\python -m uvicorn app.main:app --port 8000
-
-# 4. Build & run the watcher
-cd watcher
-go build -o mpay-watcher.exe .
-.\mpay-watcher.exe
+python -m venv .venv && .venv/Scripts/pip install -r requirements.txt
+.venv/Scripts/python -c "import app.models, app.db as d; d.Base.metadata.create_all(d.get_engine())"
+.venv/Scripts/python -m uvicorn app.main:app --port 8000
 ```
 
-### Configuration
+Build and start the watcher (`RPC_URL`, `API_URL`, `RECEIVING_ADDRESS` = your chain, API, and hot wallet):
+
+```bash
+cd watcher && go build -o mpay-watcher.exe .
+RPC_URL=https://... API_URL=http://127.0.0.1:8000 \
+RECEIVING_ADDRESS=0x... USDC_CONTRACT=0x... \
+INTERNAL_API_KEY=... MAX_BLOCKS=10 ./mpay-watcher.exe
+```
+
+> `MAX_BLOCKS` bounds the `eth_getLogs` block range per call — RPC providers cap it (Alchemy's free tier: 10). The watcher splits long catch-up ranges into windows automatically.
+
+Create a merchant and an invoice:
+
+```bash
+curl -X POST http://127.0.0.1:8000/merchants -H "Content-Type: application/json" \
+  -d '{"name":"Acme","webhook_url":"https://your-endpoint/hook"}'
+curl -X POST http://127.0.0.1:8000/merchants/1/invoices -H "Content-Type: application/json" \
+  -d '{"amount":"25.50","idempotency_key":"order-42"}'
+```
+
+The response's `payable_amount` is what the payer sends — the per-invoice unique amount is the matching key. When the transfer confirms, `https://your-endpoint/hook` receives a signed `invoice.confirmed`.
+
+### Verifying webhooks
+
+Compute HMAC-SHA256 over the **raw request body** with your merchant's `webhook_secret` (shown once at merchant creation) and compare against the `X-Mpay-Signature` header:
+
+```python
+import hmac, hashlib
+expected = hmac.new(webhook_secret.encode(), raw_body, hashlib.sha256).hexdigest()
+assert hmac.compare_digest(expected, request.headers["X-Mpay-Signature"])
+```
+
+## Configuration
+
+All settings are environment variables (see `app/config.py`); none are required for local dev with SQLite.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///./mpay.db` | SQLAlchemy URL (Postgres in prod) |
-| `RECEIVING_ADDRESS` | zero address | Hot wallet that receives payments |
+| `DATABASE_URL` | `sqlite:///./mpay.db` | `postgresql+psycopg://…` in production |
+| `RECEIVING_ADDRESS` | zero address | Hot wallet all invoices point at (lowercased automatically) |
 | `USDC_CONTRACT` | mainnet USDC | Token contract to watch |
-| `INTERNAL_API_KEY` | `dev-internal-key` | Shared key for `/internal/events` ingest |
-| `CONFIRMATION_THRESHOLD` | `12` | Blocks before CONFIRMING → CONFIRMED |
-| `INVOICE_TTL_MINUTES` | `60` | Expiry for unpaid invoices |
-| `RPC_URL` | *(empty)* | JSON-RPC endpoint for the confirmation sweep |
-| `WEBHOOK_MAX_ATTEMPTS` | `5` | Webhook attempts before giving up |
-
-The watcher reads its own env: `RPC_URL`, `API_URL`, `INTERNAL_API_KEY`,
-`RECEIVING_ADDRESS`, `USDC_CONTRACT`, `CONFIRMATIONS`, `POLL_SECONDS`,
-`MAX_BLOCKS`, `STATE_FILE`.
-
-> **The API and watcher must agree** on `RECEIVING_ADDRESS`,
-> `USDC_CONTRACT`, and `INTERNAL_API_KEY` — mismatched values are the #1
-> "my payment was never detected" cause. (The E2E smoke test once failed on
-> exactly this.)
-
----
-
-## API
-
-| Method | Path | Purpose |
-|---|---|---|
-| `POST` | `/merchants` | Create merchant; webhook secret shown **once** |
-| `POST` | `/merchants/{id}/invoices` | Create invoice (idempotent via `idempotency_key`) |
-| `GET` | `/invoices/{public_id}` | Invoice status + payments |
-| `GET` | `/merchants/{id}/invoices` | List merchant invoices |
-| `GET` | `/merchants/{id}/deliveries` | Webhook delivery log |
-| `POST` | `/internal/events` | Watcher ingest (`X-Internal-Key` guarded) |
-| `GET` | `/health` | Liveness |
-
-### Example: create and pay an invoice
-
-```bash
-# 1. Create a merchant (store the secret — it is shown once)
-curl -X POST http://localhost:8000/merchants \
-  -H "Content-Type: application/json" \
-  -d '{"name": "Acme", "webhook_url": "https://acme.example/hooks"}'
-
-# 2. Create an invoice
-curl -X POST http://localhost:8000/merchants/1/invoices \
-  -H "Content-Type: application/json" \
-  -d '{"amount": "25.50", "idempotency_key": "order-42"}'
-# → { "invoice": { "payable_amount": "25.500003", "receiving_address": "0x…",
-#                  "status": "AWAITING_PAYMENT", "expires_at": "…" } }
-
-# 3. The payer sends exactly `payable_amount` USDC to `receiving_address`.
-#    The watcher ingests the Transfer; the processor matches (address, amount)
-#    → CONFIRMING → (after CONFIRMATION_THRESHOLD blocks) → CONFIRMED → SETTLED.
-
-# 4. Check status
-curl http://localhost:8000/invoices/{public_id}
-```
-
-### Verifying a webhook (merchant side)
-
-```python
-import hmac, hashlib, flask  # any framework works
-
-raw = flask.request.get_data()                      # exact bytes, before parsing
-sig = flask.request.headers.get("X-Mpay-Signature", "")
-expected = hmac.new(WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
-assert hmac.compare_digest(expected, sig)           # then parse JSON
-```
-
----
+| `CONFIRMATION_THRESHOLD` | `12` | Blocks before `CONFIRMING → CONFIRMED` |
+| `INVOICE_TTL_MINUTES` | `60` | Unpaid invoices expire |
+| `RPC_URL` | *(empty = offline)* | Chain endpoint for confirmation depth + reconciliation |
+| `INTERNAL_API_KEY` | `dev-internal-key` | Shared secret between watcher and ingest API |
+| `WEBHOOK_MAX_ATTEMPTS` / `WEBHOOK_BACKOFF_*` | `5` / `2s, cap 60s` | Delivery retry policy |
+| `REORG_SAFETY_DEPTH` | `60` | Window in which a vanished payment is rolled back |
 
 ## Testing
 
 ```bash
-# Unit / behavior tests (21): state machine, API, processor, confirmations,
-# webhooks, plus regressions for the amount-collision and chunking fixes.
-.venv\Scripts\python -m pytest tests/ -q
-
-# End-to-end smoke: real uvicorn + the compiled Go watcher + a mock JSON-RPC
-# chain + an HMAC-verifying webhook receiver. Proves the full pipeline:
-# AWAITING_PAYMENT → CONFIRMED → SETTLED, 503-retry delivered, replay deduped.
-.venv\Scripts\python scripts\smoke_e2e.py
+pytest -q                    # behavior tests against a real (temp-file) DB
+python scripts/smoke_e2e.py  # full system: real API + real watcher + mock chain
 ```
 
-The smoke test asserts the plan's acceptance criteria end to end, including
-the two properties that matter most for a payment gateway: **a replayed
-event can never double-credit**, and **a down webhook endpoint still
-receives its delivery**.
+The smoke test drives the actual binaries end-to-end — invoice → on-chain transfer → confirmations → signed webhook (after a simulated outage) → settlement → replay dedupe.
 
----
+## Security model
 
-## Security notes
-
-- Webhook secrets are generated server-side, returned once, and verified
-  with constant-time comparison.
-- The internal ingest endpoint is guarded by `X-Internal-Key` and rejects
-  unauthenticated requests before body validation.
-- Money crosses the API only as exact decimal strings; conversion to integer
-  base units happens in one audited module (`app/money.py`) — never floats.
-- `.env` is gitignored; never commit provider keys. If a key was ever shared
-  in plaintext, rotate it.
-
----
+- **Non-custodial:** payments move payer-to-merchant directly on-chain; Mpay never holds funds.
+- Webhook secrets are generated server-side, returned once, and verified with constant-time comparison.
+- The internal ingest endpoint is guarded by `X-Internal-Key` and rejects unauthenticated requests before body validation.
+- Money crosses the API only as exact decimal strings; conversion to integer base units happens in one audited module (`app/money.py`) — never floats.
+- Addresses are normalized to lowercase at every boundary; matching is case-exact at the database level.
 
 ## Roadmap
 
-- [ ] Sepolia testnet run with real USDC end-to-end
-- [ ] Reconciliation job (DB truth vs. chain truth)
-- [ ] Reorg handling (`rollback` path in the state machine)
-- [ ] Per-invoice HD-derived addresses (removes amount-offset matching)
-- [ ] Multi-chain support (second EVM chain)
-- [ ] Split background loops into dedicated workers + queue
-- [ ] Merchant dashboard
+- [x] Exactly-once event processing, confirmation tracking, signed webhook delivery
+- [x] Reconciliation job (stuck-confirmation rescue, chain cross-check)
+- [x] Reorg handling (payment rollback + merchant notification)
+- [ ] Merchant API keys + hosted checkout page (payment link with QR)
+- [ ] Over/underpayment policy
+- [ ] Second token / chain
 
----
+## License
 
-*Local working notes (`plan.md`, `DECISIONS.md`, `REVIEW_FINDINGS.md`) are
-intentionally untracked; they guide development but are not part of the
-shipped repo.*
-
+MIT — see [LICENSE](LICENSE).
