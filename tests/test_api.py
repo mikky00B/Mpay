@@ -213,3 +213,95 @@ def test_settled_invoice_amount_can_repeat(client, merchant, db_url):
             )
         ).scalars().all()
     assert len(open_rows) == 1  # only the new open one; settled row doesn't block it
+
+
+# --------------------------------------------------------------------------
+# [D17] Finding 3 regression tests: hex identifiers are case-canonicalized at
+# every boundary. A checksummed (EIP-55, mixed-case) RECEIVING_ADDRESS in
+# settings once stored mixed-case on invoices while the watcher delivered
+# lowercase to_address — SQLite compares case-sensitively, so every real
+# payment was silently SKIPPED.
+# --------------------------------------------------------------------------
+
+def test_mixed_case_settings_address_is_normalized_and_credits(client, merchant, db_url, monkeypatch):
+    """THE live bug: settings hold a MIXED-CASE hot address; the watcher
+    delivers lowercase to_address. The event must credit the invoice."""
+    from app.config import get_settings
+    from app.db import get_sessionmaker
+    from app.processor import run_pending
+
+    # Simulate .env holding the EIP-55 checksummed form (mixed case).
+    checksummed = "0xHOT000000000000000000000000000000000009"
+    assert checksummed != checksummed.lower() and checksummed.lower() == (
+        "0xhot000000000000000000000000000000000009"
+    )
+    monkeypatch.setenv("RECEIVING_ADDRESS", checksummed)
+    get_settings.cache_clear()  # settings are cached; re-read with the new env
+
+    try:
+        r = client.post(
+            f"/merchants/{merchant['id']}/invoices",
+            json={"amount": "7.5", "idempotency_key": "case-1"},
+        )
+        assert r.status_code == 201, r.text
+        inv = r.json()["invoice"]
+        # Boundary 1: invoice stores the CANONICAL lowercase address.
+        assert inv["receiving_address"] == checksummed.lower(), (
+            "invoice must store a lowercased receiving_address [D17]"
+        )
+
+        # Boundary 2: ingest stores the event's addresses lowercase.
+        payable = _to_base_units(inv["payable_amount"])
+        ev = _event(tx="0xTXCASE00000000000000000000000000000001", amount=payable)
+        ev["to_address"] = checksummed.lower()  # watcher always lowercases
+        r = client.post(
+            "/internal/events",
+            json={"events": [ev]},
+            headers={"X-Internal-Key": "test-internal-key"},
+        )
+        assert r.status_code == 202, r.text
+
+        # Boundary 3: matching is now a plain == over canonical rows.
+        with get_sessionmaker(db_url)() as db:
+            outcomes = run_pending(db)
+        assert outcomes[0]["outcome"] == "credited", outcomes
+    finally:
+        get_settings.cache_clear()  # don't leak the mixed-case env into other tests
+
+
+def test_ingest_normalizes_mixed_case_hex_fields(client, merchant, db_url):
+    """Ingest lowercases tx_hash and all addresses at the storage boundary,
+    so replays dedupe regardless of the case the watcher sent."""
+    from sqlalchemy import select
+    from app.db import get_sessionmaker
+    from app.models import ChainEvent
+
+    ev = _event(tx="0xABCDEF00000000000000000000000000000009")
+    ev["to_address"] = "0xHOT000000000000000000000000000000000009"
+    ev["from_address"] = "0xPAYER0000000000000000000000000000000000"
+    ev["contract_address"] = "0xUSDC0000000000000000000000000000000000"
+    h = {"X-Internal-Key": "test-internal-key"}
+    r1 = client.post("/internal/events", json={"events": [ev]}, headers=h)
+    # Same event, different case -> same canonical row -> duplicate.
+    ev2 = dict(ev, to_address="0xhot000000000000000000000000000000000009")
+    r2 = client.post("/internal/events", json={"events": [ev2]}, headers=h)
+    assert r1.json()["accepted"] == 1
+    assert r2.json()["duplicates"] == 1
+
+    with get_sessionmaker(db_url)() as db:
+        row = db.execute(
+            select(ChainEvent).where(ChainEvent.tx_hash == "0xabcdef00000000000000000000000000000009")
+        ).scalar_one()
+    assert row.to_address == "0xHOT000000000000000000000000000000000009".lower()
+    assert row.from_address == "0xPAYER0000000000000000000000000000000000".lower()
+    assert row.contract_address == "0xUSDC0000000000000000000000000000000000".lower()
+
+
+def test_settings_validator_lowercases_addresses():
+    """Single source of truth [D17]: Settings itself canonicalizes hex fields,
+    so any future code path that reads settings gets lowercase for free."""
+    from app.config import Settings
+
+    s = Settings(receiving_address="0xAbCdEf0000000000000000000000000000000001", usdc_contract="0xUsDc0000000000000000000000000000000001")
+    assert s.receiving_address == "0xabcdef0000000000000000000000000000000001"
+    assert s.usdc_contract == "0xusdc0000000000000000000000000000000001"

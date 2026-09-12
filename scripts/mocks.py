@@ -15,7 +15,11 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-HOT = "0x0000000000000000000000000000000000000aa9"
+# Hot address is MIXED-CASE on purpose [D17]: real chains return lowercase
+# log addresses while config (EIP-55) is checksummed. The old all-lowercase
+# constant once hid exactly that bug. The watcher lowercases both the filter
+# topic and ingested to_address; the API must normalize its side too.
+HOT = "0x0000000000000000000000000000000000000Aa9"
 USDC = "0x0000000000000000000000000000000000000bb8"
 PAYER = "0x0000000000000000000000000000000000000cc7"
 TX_HASH = "0xsmoketx0000000000000000000000000000000000000000000000000000000001"

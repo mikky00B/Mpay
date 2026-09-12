@@ -5,6 +5,7 @@ zero setup (SQLite, per [D3]).
 """
 from functools import lru_cache
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -14,6 +15,9 @@ class Settings(BaseSettings):
 
     # --- Chain / watcher [D5][D6] ---
     # Shared hot address that receives all USDC payments (D6).
+    # Normalized to lowercase at load [D17]: .env holds the EIP-55 checksummed
+    # form, but chain events are lowercase and SQLite compares case-
+    # sensitively — accepting mixed case here silently dropped real payments.
     receiving_address: str = "0x0000000000000000000000000000000000000000"
     # USDC contract on Ethereum mainnet; tests override with a fake address.
     usdc_contract: str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
@@ -43,6 +47,12 @@ class Settings(BaseSettings):
     webhook_timeout_seconds: float = 10.0
 
     model_config = {"env_file": ".env", "extra": "ignore"}
+
+    @field_validator("receiving_address", "usdc_contract")
+    @classmethod
+    def _canonicalize_address(cls, v: str) -> str:
+        """Lowercase hex identifiers once, at the single source of truth [D17]."""
+        return v.strip().lower()
 
 
 @lru_cache

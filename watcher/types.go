@@ -22,10 +22,12 @@ type rpcLog struct {
 	BlockNumber string   `json:"blockNumber"`
 	BlockHash   string   `json:"blockHash"`
 	TxHash      string   `json:"transactionHash"`
-	Index       string   `json:"logIndex"`
-	Address     string   `json:"address"`
-	Topics      []string `json:"topics"`
-	Data        string   `json:"data"`
+	// RawMessage, not string: spec-compliant providers send hex-quantity
+	// STRINGS ("0x0") while test mocks send plain numbers (0) — both accepted.
+	Index    json.RawMessage `json:"logIndex"`
+	Address  string          `json:"address"`
+	Topics   []string        `json:"topics"`
+	Data     string          `json:"data"`
 }
 
 // parseQuantity accepts a JSON-RPC quantity ("0x10d4f") or a plain decimal

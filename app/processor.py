@@ -35,6 +35,12 @@ log = logging.getLogger(__name__)
 def _find_matching_invoice(db: Session, event: ChainEvent) -> Invoice | None:
     """Match a Transfer event to a payable invoice by (to_address, amount).
 
+    Case canonicalization [D17]: both sides are lowercase by construction —
+    invoices store settings.receiving_address lowercased, events store
+    to_address lowercased at ingest — so the plain `==` is correct and
+    index-friendly. (SQLite compares case-sensitively; a checksummed hot
+    address once made every real payment skip until this invariant existed.)
+
     Deterministic ordering [D15]: even if a (address, amount) collision ever
     sneaks in (e.g. an invoice created before the unique index existed), the
     lowest-id open invoice wins reproducibly instead of an arbitrary one.

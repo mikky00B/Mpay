@@ -73,7 +73,7 @@ func (w *watcher) run(ctx context.Context) error {
 						log.Printf("skip log %s:? : %v", l.TxHash, err)
 						continue
 					}
-					logIndex, err := parseQuantity(l.Index)
+					logIndex, err := parseQuantity(strings.Trim(string(l.Index), `"`))
 					if err != nil {
 						log.Printf("skip log %s: bad logIndex: %v", l.TxHash, err)
 						continue

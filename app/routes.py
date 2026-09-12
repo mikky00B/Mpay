@@ -148,7 +148,11 @@ def create_invoice(merchant_id: int, body: InvoiceCreate, db: Session = Depends(
         requested_base_units=requested,
         amount_base_units=requested,  # finalized after flush assigns the id [D6]
         status=InvoiceStatus.CREATED,
-        receiving_address=s.receiving_address,
+        # [D17] canonical form: chain events always arrive lowercase (the
+        # watcher lowercases log addresses), and SQLite compares case-
+        # sensitively — an EIP-55 checksummed RECEIVING_ADDRESS here once made
+        # every real payment silently SKIPPED. Lowercase at the boundary.
+        receiving_address=s.receiving_address.strip().lower(),
         idempotency_key=body.idempotency_key,
         expires_at=now + timedelta(minutes=s.invoice_ttl_minutes),
     )
@@ -255,12 +259,17 @@ def ingest_events(
     state to unwind); the UNIQUE (tx_hash, log_index) index [D7] remains the
     concurrency backstop — a true race surfaces as an error and the watcher
     simply retries, since replays are always safe.
+
+    Canonicalization [D17]: hex identifiers (tx hashes, addresses) are
+    lowercased here at the storage boundary. The watcher lowercases its side
+    already; normalizing ours too makes every downstream comparison a plain
+    case-insensitive-by-construction `==` (SQLite compares case-sensitively).
     """
     inserted, duplicates = 0, 0
     for ev in batch.events:
         existing = db.execute(
             select(ChainEvent.id).where(
-                ChainEvent.tx_hash == ev.tx_hash,
+                ChainEvent.tx_hash == ev.tx_hash.lower(),
                 ChainEvent.log_index == ev.log_index,
             )
         ).scalar_one_or_none()
@@ -269,13 +278,13 @@ def ingest_events(
             continue
         db.add(
             ChainEvent(
-                tx_hash=ev.tx_hash,
+                tx_hash=ev.tx_hash.lower(),
                 log_index=ev.log_index,
                 block_number=ev.block_number,
-                block_hash=ev.block_hash,
-                contract_address=ev.contract_address,
-                from_address=ev.from_address,
-                to_address=ev.to_address,
+                block_hash=ev.block_hash.lower() if ev.block_hash else None,
+                contract_address=ev.contract_address.lower(),
+                from_address=ev.from_address.lower(),
+                to_address=ev.to_address.lower(),
                 amount_base_units=ev.amount_base_units,
                 token=ev.token,
                 raw_payload=ev.raw_payload,
