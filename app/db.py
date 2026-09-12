@@ -43,6 +43,22 @@ def get_sessionmaker(database_url: str | None = None) -> sessionmaker:
     return sessionmaker(bind=get_engine(database_url), expire_on_commit=False, future=True)
 
 
+def ensure_schema(engine: Engine | None = None) -> None:
+    """Lightweight migration for EXISTING databases: `create_all` only creates
+    missing tables, never new columns on tables that already exist — so the
+    real mpay.db would silently lack columns added after first run [D19].
+    Idempotent: each ALTER is applied at most once, duplicates are ignored.
+    """
+    from sqlalchemy import text
+
+    eng = engine or get_engine()
+    with eng.begin() as conn:
+        try:
+            conn.execute(text("ALTER TABLE payments ADD COLUMN orphaned_at DATETIME"))
+        except Exception:  # column already exists (or fresh DB without the table)
+            pass
+
+
 def get_db() -> Iterator[Session]:
     """FastAPI dependency: one session per request, always closed."""
     db = get_sessionmaker()()

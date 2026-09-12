@@ -54,6 +54,7 @@ class ChainEventStatus(str, enum.Enum):
     PENDING = "pending"      # raw, not yet applied to the state machine
     PROCESSED = "processed"  # applied successfully
     SKIPPED = "skipped"      # applied, but irrelevant (e.g. no matching invoice)
+    ORPHANED = "orphaned"    # was processed, then reorged off the chain [D19]
 
 
 class DeliveryStatus(str, enum.Enum):
@@ -187,6 +188,11 @@ class Payment(Base):
     log_index: Mapped[int] = mapped_column(Integer)
     block_number: Mapped[int] = mapped_column(BigInteger)
     amount_base_units: Mapped[int] = mapped_column(BigInteger)
+    # Set when the chain reorged this payment away [D19]. Rows are NEVER
+    # deleted — the audit trail must show credited-then-orphaned history.
+    orphaned_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     invoice: Mapped[Invoice] = relationship(back_populates="payments")

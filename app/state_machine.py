@@ -8,8 +8,17 @@ Legal lifecycle (plan.md):
     CONFIRMING -> CONFIRMED
     CONFIRMED -> SETTLED
 
+Reorg rollbacks [D19] — the reverse edges, used ONLY by the reconciliation
+job when the chain itself invalidates a credited payment:
+
+    CONFIRMED -> CONFIRMING -> DETECTED -> AWAITING_PAYMENT
+
+SETTLED and EXPIRED remain terminal: a settled invoice was already confirmed
+at threshold depth and the merchant was notified — unwinding it is an
+operator decision, never an automatic one.
+
 Anything else is a bug and raises `IllegalTransition` — loud failure beats
-silent drift. Terminal states (SETTLED, EXPIRED) accept no further moves.
+silent drift.
 """
 from __future__ import annotations
 
@@ -27,9 +36,9 @@ class IllegalTransition(Exception):
 LEGAL: dict[InvoiceStatus, set[InvoiceStatus]] = {
     InvoiceStatus.CREATED: {InvoiceStatus.AWAITING_PAYMENT},
     InvoiceStatus.AWAITING_PAYMENT: {InvoiceStatus.DETECTED, InvoiceStatus.EXPIRED},
-    InvoiceStatus.DETECTED: {InvoiceStatus.CONFIRMING},
-    InvoiceStatus.CONFIRMING: {InvoiceStatus.CONFIRMED},
-    InvoiceStatus.CONFIRMED: {InvoiceStatus.SETTLED},
+    InvoiceStatus.DETECTED: {InvoiceStatus.CONFIRMING, InvoiceStatus.AWAITING_PAYMENT},
+    InvoiceStatus.CONFIRMING: {InvoiceStatus.CONFIRMED, InvoiceStatus.DETECTED},
+    InvoiceStatus.CONFIRMED: {InvoiceStatus.SETTLED, InvoiceStatus.CONFIRMING},
     # Terminal — no exits.
     InvoiceStatus.SETTLED: set(),
     InvoiceStatus.EXPIRED: set(),

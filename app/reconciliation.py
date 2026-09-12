@@ -16,13 +16,16 @@ the opposite question: "does the database agree with reality?" Four checks:
    currently-open invoice is the exact signature of the live case-sensitivity
    bug [D17]. Make it observable, alert only.
 4. CHAIN CROSS-CHECK — re-verify credited payments against the chain via
-   eth_getTransactionReceipt. In v1 this REPORTS mismatches (missing receipt
-   or changed block hash); acting on them (rollback) is the reorg job [D19].
-   Only payments inside the reorg-safety window are actionable; a payment
-   that old can only mean an RPC/data problem, not an orphan.
+   eth_getTransactionReceipt, comparing block hashes. A payment inside the
+   reorg-safety window that no longer resolves is ORPHANED: audit rows are
+   marked (never deleted), the invoice rolls back to AWAITING_PAYMENT along
+   the state machine's rollback edges [D19], and the merchant gets an
+   invoice.reorgged webhook. Mismatches OUTSIDE the window are only logged —
+   too old to be a reorg, so they mean an RPC/data problem requiring an
+   operator. SETTLED invoices are never auto-rolled-back.
 
-`fetch_receipt` is injectable so tests never touch the network; offline mode
-(empty rpc_url) skips the cross-check entirely.
+`fetch_receipt` and `latest_block` are injectable so tests never touch the
+network; offline mode (empty rpc_url) skips the cross-check entirely.
 """
 from __future__ import annotations
 
@@ -155,16 +158,67 @@ def _suspicious_skips(db: Session) -> int:
     return len(seen)
 
 
+def _apply_reorg(db: Session, payment: Payment, event: ChainEvent,
+                 invoice: Invoice | None) -> None:
+    """A previously-credited payment no longer exists on the chain [D19].
+
+    Marks the audit rows orphaned (never deleted), rolls the invoice back to
+    AWAITING_PAYMENT along the state machine's rollback edges, and notifies
+    the merchant with an invoice.reorgged webhook. SETTLED invoices are NEVER
+    auto-rolled-back (terminal [D19]) — operator review instead.
+    """
+    from app.webhooks import enqueue
+    from app.state_machine import transition
+
+    if payment.orphaned_at is not None:
+        return
+    payment.orphaned_at = utcnow()
+    event.status = ChainEventStatus.ORPHANED
+
+    if invoice is None or invoice.status is InvoiceStatus.AWAITING_PAYMENT:
+        return
+    if invoice.status is InvoiceStatus.SETTLED:
+        log.error(
+            "reorg: payment %s:%s on SETTLED invoice %s vanished from the chain "
+            "— NOT auto-rolled-back; operator review required",
+            payment.tx_hash[:16], payment.log_index, invoice.public_id,
+        )
+        return
+
+    # Roll back along legal edges; the invoice becomes payable again — the
+    # same unique payable amount simply re-arms [D6].
+    while invoice.status is not InvoiceStatus.AWAITING_PAYMENT:
+        prev = {
+            InvoiceStatus.CONFIRMED: InvoiceStatus.CONFIRMING,
+            InvoiceStatus.CONFIRMING: InvoiceStatus.DETECTED,
+            InvoiceStatus.DETECTED: InvoiceStatus.AWAITING_PAYMENT,
+        }[invoice.status]
+        transition(invoice, prev)
+    invoice.paid_base_units = max(
+        0, invoice.paid_base_units - payment.amount_base_units
+    )
+    invoice.detected_block = None
+    invoice.confirmed_block = None
+    enqueue(db, invoice, "invoice.reorgged")
+    log.warning(
+        "reorg: payment %s:%s rolled back; invoice %s -> AWAITING_PAYMENT "
+        "(paid_base_units=%s)",
+        payment.tx_hash[:16], payment.log_index, invoice.public_id,
+        invoice.paid_base_units,
+    )
+
+
 def _crosscheck_payments(db: Session, latest_block: int | None,
                          fetch) -> dict[str, int]:
-    """Re-verify credited payments against the chain. Report-only in [D18]."""
+    """Re-verify credited payments against the chain [D18]/[D19]."""
     s = get_settings()
-    stats = {"checked": 0, "mismatched": 0}
+    stats = {"checked": 0, "mismatched": 0, "orphaned": 0}
     if latest_block is None:
         return stats  # offline mode — nothing to verify against
     payments = (
         db.execute(
             select(Payment)
+            .where(Payment.orphaned_at.is_(None))
             .order_by(Payment.created_at.desc())
             .limit(s.reconciliation_crosscheck_batch)
         )
@@ -179,15 +233,18 @@ def _crosscheck_payments(db: Session, latest_block: int | None,
             break  # RPC trouble voids the whole pass — do NOT act on partial data
         stats["checked"] += 1
         ev = db.get(ChainEvent, p.chain_event_id)
+        if ev is None or ev.status is ChainEventStatus.ORPHANED:
+            continue
         receipt_ok = receipt is not None and receipt.get("blockHash") == ev.block_hash
         if receipt_ok:
             continue
         stats["mismatched"] += 1
         if p.block_number > latest_block - s.reorg_safety_depth:
-            # Inside the reorg window — actionable, see [D19] (rollback job).
-            log.warning("reconciliation: payment %s:%s (invoice %s) NOT found on "
-                        "chain with matching block hash — orphan candidate",
-                        p.tx_hash[:16], p.log_index, p.invoice_id)
+            # Inside the reorg window — the chain is authoritative and the
+            # payment is gone: roll it back [D19].
+            invoice = db.get(Invoice, p.invoice_id)
+            _apply_reorg(db, p, ev, invoice)
+            stats["orphaned"] += 1
         else:
             log.error("reconciliation: payment %s:%s (invoice %s) missing on "
                       "chain OUTSIDE the reorg safety window — not actionable "

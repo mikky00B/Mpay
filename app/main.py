@@ -86,6 +86,9 @@ def _run_reconciliation_tick() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s = get_settings()
+    from app.db import ensure_schema
+
+    ensure_schema()  # new columns on pre-existing DBs (create_all won't) [D19]
     tasks = [
         asyncio.create_task(_repeat(s.processor_poll_seconds, _run_processor_tick)),
         asyncio.create_task(_repeat(s.sweep_poll_seconds, _run_sweep_tick)),

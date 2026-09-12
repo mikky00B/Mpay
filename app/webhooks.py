@@ -1,7 +1,7 @@
 """Webhook signing + reliable delivery [D8] (build step 6).
 
 Event types emitted: invoice.detected, invoice.confirmed, invoice.settled,
-invoice.expired.
+invoice.expired, invoice.reorgged [D19].
 
 Semantics:
 - One `webhook_deliveries` row per ATTEMPT: pending → delivered | failed.

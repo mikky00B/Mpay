@@ -37,3 +37,18 @@ def test_same_state_is_idempotent_noop():
     i = inv(InvoiceStatus.DETECTED)
     transition(i, InvoiceStatus.DETECTED)  # replayed transition: fine
     assert i.status is InvoiceStatus.DETECTED
+
+
+def test_reorg_rollback_chain_is_legal():
+    """[D19] CONFIRMED -> CONFIRMING -> DETECTED -> AWAITING_PAYMENT."""
+    i = inv(InvoiceStatus.CONFIRMED)
+    transition(i, InvoiceStatus.CONFIRMING)
+    transition(i, InvoiceStatus.DETECTED)
+    transition(i, InvoiceStatus.AWAITING_PAYMENT)
+    assert i.status is InvoiceStatus.AWAITING_PAYMENT
+
+
+def test_settled_and_expired_still_terminal():
+    for terminal in (InvoiceStatus.SETTLED, InvoiceStatus.EXPIRED):
+        with pytest.raises(IllegalTransition):
+            transition(inv(terminal), InvoiceStatus.CONFIRMING)

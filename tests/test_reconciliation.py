@@ -188,15 +188,68 @@ def test_crosscheck_passes_when_receipt_matches(db_url):
     assert inv.status is InvoiceStatus.CONFIRMED
 
 
-def test_crosscheck_flags_missing_receipt_within_safety_window(db_url):
+def test_crosscheck_orphans_missing_receipt_within_safety_window(db_url):
+    """[D19] payment gone from the chain within the reorg window -> orphan."""
     db = _session(db_url)
     inv, ev, p = _confirmed_payment(db)
 
     stats = reconcile(db, latest_block=130, fetch=lambda tx: None)  # depth 30 < 60
-    assert stats["mismatched"] == 1
-    # [D18] report-only: nothing may change state yet
+    assert stats["mismatched"] == 1 and stats["orphaned"] == 1
+
+    db.refresh(p)
+    assert p.orphaned_at is not None
+    db.refresh(ev)
+    assert ev.status is ChainEventStatus.ORPHANED
     db.refresh(inv)
-    assert inv.status is InvoiceStatus.CONFIRMED
+    assert inv.status is InvoiceStatus.AWAITING_PAYMENT
+    assert inv.paid_base_units == 0
+    assert inv.detected_block is None and inv.confirmed_block is None
+    types = [
+        d.event_type
+        for d in db.execute(select(WebhookDelivery)
+                            .where(WebhookDelivery.invoice_id == inv.id))
+        .scalars().all()
+    ]
+    assert "invoice.reorgged" in types
+
+
+def test_reorged_invoice_can_be_repaid(db_url):
+    """After a reorg the same payable amount re-arms and a new tx credits."""
+    db = _session(db_url)
+    inv, ev, p = _confirmed_payment(db)
+    reconcile(db, latest_block=130, fetch=lambda tx: None)
+    db.refresh(inv)
+    assert inv.status is InvoiceStatus.AWAITING_PAYMENT
+
+    # A new on-chain payment for the same unique amount arrives:
+    from app.processor import process_event
+
+    ev2 = _event(db, tx="0xnewtx", amount=inv.amount_base_units)
+    assert process_event(db, ev2) == "credited"
+    db.commit()
+    db.refresh(inv)
+    assert inv.status is InvoiceStatus.CONFIRMING
+    assert inv.paid_base_units == inv.amount_base_units
+
+
+def test_settled_invoice_never_auto_rolled_back(db_url):
+    """[D19] policy: SETTLED is terminal — the merchant was already told."""
+    db = _session(db_url)
+    m = _merchant(db)
+    inv = _invoice(db, m, status=InvoiceStatus.SETTLED, detected_block=100)
+    ev = _event(db, block_number=100, block_hash="0xhash1")
+    ev.status = ChainEventStatus.PROCESSED
+    db.commit()
+    p = _payment(db, inv, ev)
+
+    stats = reconcile(db, latest_block=130, fetch=lambda tx: None)
+    assert stats["orphaned"] == 1
+    db.refresh(inv)
+    assert inv.status is InvoiceStatus.SETTLED  # untouched
+    db.refresh(p)
+    assert p.orphaned_at is not None            # audit rows still marked
+    db.refresh(ev)
+    assert ev.status is ChainEventStatus.ORPHANED
 
 
 def test_crosscheck_flags_block_hash_mismatch(db_url):
