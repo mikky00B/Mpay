@@ -71,6 +71,18 @@ def _run_dispatcher_tick() -> None:
         db.close()
 
 
+def _run_reconciliation_tick() -> None:
+    from app.reconciliation import reconcile
+
+    db = get_sessionmaker()()
+    try:
+        stats = reconcile(db)
+        if any(v for k, v in stats.items() if k != "checked"):
+            log.info("reconciliation: %s", stats)
+    finally:
+        db.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     s = get_settings()
@@ -78,8 +90,9 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_repeat(s.processor_poll_seconds, _run_processor_tick)),
         asyncio.create_task(_repeat(s.sweep_poll_seconds, _run_sweep_tick)),
         asyncio.create_task(_repeat(s.dispatcher_poll_seconds, _run_dispatcher_tick)),
+        asyncio.create_task(_repeat(s.reconciliation_poll_seconds, _run_reconciliation_tick)),
     ]
-    log.info("background jobs started (processor/sweep/dispatcher)")
+    log.info("background jobs started (processor/sweep/dispatcher/reconciliation)")
     yield
     for t in tasks:
         t.cancel()

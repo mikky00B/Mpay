@@ -40,6 +40,17 @@ class Settings(BaseSettings):
     sweep_poll_seconds: float = 2.0
     dispatcher_poll_seconds: float = 1.0
 
+    # --- Reconciliation (build step 7) [D18] ---
+    reconciliation_poll_seconds: float = 30.0
+    # chain_events pending longer than this => processor loop suspected dead.
+    reconciliation_stale_pending_seconds: int = 300
+    # Max payments re-verified against the chain per pass (RPC rate limiting).
+    reconciliation_crosscheck_batch: int = 25
+    # Max webhook re-enqueues per pass (outage can't create a delivery storm).
+    reconciliation_rescue_cap: int = 10
+    # Reorg window [D19]: payments this many blocks from head are actionable.
+    reorg_safety_depth: int = 60
+
     # --- Webhooks [D8] ---
     webhook_max_attempts: int = 5
     webhook_backoff_base_seconds: float = 2.0
