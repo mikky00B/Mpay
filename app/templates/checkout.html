@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Invoice {{ inv.public_id[:8] }} — pay {{ inv.payable_amount }} {{ inv.token }}</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
+         background: #f6f7f9; color: #1a1f26; }
+  .card { max-width: 420px; margin: 6vh auto; background: #fff; border-radius: 12px;
+          padding: 32px; box-shadow: 0 4px 24px rgba(0,0,0,.08); }
+  h1 { font-size: 15px; font-weight: 600; color: #5b6673; margin: 0 0 4px; }
+  .amount { font-size: 34px; font-weight: 700; margin: 0 0 18px; }
+  .amount small { font-size: 16px; font-weight: 500; color: #5b6673; }
+  .badge { display: inline-block; padding: 4px 12px; border-radius: 999px;
+           font-size: 13px; font-weight: 600; letter-spacing: .3px; }
+  .AWAITING_PAYMENT { background: #fff4d6; color: #8a6100; }
+  .DETECTED, .CONFIRMING { background: #e0edff; color: #0b5ed7; }
+  .CONFIRMED, .SETTLED { background: #d6f5e0; color: #0a7d38; }
+  .EXPIRED { background: #fde0e0; color: #b02a2a; }
+  .qr { display: block; margin: 22px auto 8px; width: 220px; height: 220px; }
+  .hint { text-align: center; color: #5b6673; font-size: 13px; margin: 4px 0 18px; }
+  .addr { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all;
+          background: #f0f2f5; border-radius: 8px; padding: 10px; }
+  .row { display: flex; justify-content: space-between; font-size: 14px;
+         padding: 6px 0; color: #3c4653; }
+  .row span:first-child { color: #5b6673; }
+  @media (prefers-color-scheme: dark) {
+    body { background: #12161c; color: #e6eaef; }
+    .card { background: #1b2028; box-shadow: 0 4px 24px rgba(0,0,0,.4); }
+    .addr { background: #262c36; }
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Invoice #{{ inv.public_id[:8] }}{% if inv.description %} — {{ inv.description }}{% endif %}</h1>
+  <p class="amount">{{ inv.payable_amount }} <small>{{ inv.token }}</small></p>
+  <span class="badge {{ inv.status }}" id="status">{{ inv.status }}</span>
+
+  {% if inv.status in ('AWAITING_PAYMENT', 'DETECTED', 'CONFIRMING') %}
+  <img class="qr" src="data:image/svg+xml;base64,{{ qr_b64 }}"
+       alt="Scan to pay {{ inv.payable_amount }} {{ inv.token }}">
+  <p class="hint">Scan with your wallet — amount and token are pre-filled.
+     Send <strong>exactly</strong> {{ inv.payable_amount }} {{ inv.token }}.</p>
+  <div class="addr" id="addr">{{ inv.receiving_address }}</div>
+  {% elif inv.status == 'SETTLED' %}
+  <p class="hint">✅ Paid — thank you!</p>
+  {% elif inv.status == 'EXPIRED' %}
+  <p class="hint">This invoice has expired. Request a new one.</p>
+  {% else %}
+  <p class="hint">Payment received — waiting for network confirmations.</p>
+  {% endif %}
+
+  <div class="row"><span>Network</span><span>{{ inv.chain }}</span></div>
+  <div class="row"><span>Requested</span><span>{{ inv.requested_amount }} {{ inv.token }}</span></div>
+  <div class="row"><span>Paid so far</span><span>{{ inv.paid_amount }} {{ inv.token }}</span></div>
+  {% if inv.expires_at %}<div class="row"><span>Expires</span><span>{{ inv.expires_at }}</span></div>{% endif %}
+</div>
+<script>
+  // Poll the public status endpoint; stop once the invoice is terminal.
+  (function poll() {
+    fetch('/invoices/{{ inv.public_id }}').then(r => r.json()).then(d => {
+      const s = d.invoice.status, el = document.getElementById('status');
+      if (el && s !== el.textContent) { location.reload(); return; }
+      if (s !== 'SETTLED' && s !== 'EXPIRED') setTimeout(poll, 5000);
+    }).catch(() => setTimeout(poll, 5000));
+  })();
+</script>
+</body>
+</html>

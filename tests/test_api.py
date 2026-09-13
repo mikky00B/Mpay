@@ -349,3 +349,32 @@ def test_settings_validator_lowercases_addresses():
     s = Settings(receiving_address="0xAbCdEf0000000000000000000000000000000001", usdc_contract="0xUsDc0000000000000000000000000000000001")
     assert s.receiving_address == "0xabcdef0000000000000000000000000000000001"
     assert s.usdc_contract == "0xusdc0000000000000000000000000000000001"
+
+
+# --------------------------------------------------------------------------
+# [D21] Hosted checkout page: public fields only, QR payment URI, no secrets.
+# --------------------------------------------------------------------------
+
+def test_checkout_page_renders_public_fields_and_qr(client, merchant):
+    r = client.post(
+        f"/merchants/{merchant['id']}/invoices",
+        json={"amount": "12.34", "description": "Widget"},
+        headers=_auth(merchant),
+    )
+    pid = r.json()["invoice"]["public_id"]
+
+    page = client.get(f"/pay/{pid}")
+    assert page.status_code == 200
+    body = page.text
+    assert "12.34" in body
+    assert "AWAITING_PAYMENT" in body
+    assert "data:image/svg+xml;base64," in body   # QR is embedded, no external calls
+    assert "0xhot" in body                        # receiving address is public info
+
+    # The page must NEVER carry secret material:
+    assert merchant["api_key"] not in body
+    assert merchant["webhook_secret"] not in body
+
+
+def test_checkout_page_404_for_unknown_invoice(client):
+    assert client.get("/pay/doesnotexist").status_code == 404

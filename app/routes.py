@@ -19,13 +19,19 @@ Money crosses the API only as decimal strings [D4]; conversion is exact.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
+import io
 import logging
+import os
 import secrets as _secrets
 from datetime import timedelta
 
-from fastapi import APIRouter, Depends, Header, HTTPException
+import segno
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.responses import HTMLResponse
+from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -50,6 +56,9 @@ from app.state_machine import transition
 
 log = logging.getLogger(__name__)
 router = APIRouter()
+templates = Jinja2Templates(
+    directory=os.path.join(os.path.dirname(__file__), "templates")
+)
 
 
 def _iso_z(dt) -> str | None:
@@ -238,6 +247,29 @@ def get_invoice(public_id: str, db: Session = Depends(get_db)):
         for p in inv.payments
     ]
     return {"invoice": invoice_out(inv), "payments": payments}
+
+
+@router.get("/pay/{public_id}", response_class=HTMLResponse)
+def checkout_page(public_id: str, request: Request, db: Session = Depends(get_db)):
+    """Hosted checkout [D21]: the payment link is this URL. Renders ONLY the
+    public invoice fields (same visibility as GET /invoices/{public_id}) — no
+    merchant internals, no secrets. The QR encodes an EIP-681 payment URI so
+    wallet apps pre-fill the token contract and the exact payable amount."""
+    inv = get_invoice(public_id, db)["invoice"]
+    # EIP-681: ethereum:<token>/transfer?address=<recipient>&uint256=<base units>
+    uri = (
+        f"ethereum:{get_settings().usdc_contract}/transfer"
+        f"?address={inv['receiving_address']}"
+        f"&uint256={money.parse_amount_to_base_units(inv['payable_amount'])}"
+    )
+    qr = segno.make(uri, error="h")  # high ECC — survives wallet-camera artifacts
+    buf = io.BytesIO()
+    qr.save(buf, kind="svg", scale=8, border=2)
+    return templates.TemplateResponse(
+        request=request,
+        name="checkout.html",
+        context={"inv": inv, "qr_b64": base64.b64encode(buf.getvalue()).decode("ascii")},
+    )
 
 
 @router.get("/merchants/{merchant_id}/invoices")

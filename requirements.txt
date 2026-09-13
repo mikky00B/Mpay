@@ -7,3 +7,7 @@ httpx>=0.27
 
 # Dev / tests
 pytest>=8.0
+
+# Checkout page [D21]
+jinja2>=3.1
+segno>=1.6
