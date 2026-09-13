@@ -279,16 +279,19 @@ def checkout_page(public_id: str, request: Request, db: Session = Depends(get_db
     wallet apps pre-fill the token contract, the CHAIN, and the exact
     payable amount."""
     inv = get_invoice(public_id, db)["invoice"]
-    qr = segno.make(
-        _payment_uri(money.parse_amount_to_base_units(inv["payable_amount"])),
-        error="h",  # high ECC — survives wallet-camera artifacts
-    )
+    amount_base_units = money.parse_amount_to_base_units(inv["payable_amount"])
+    payment_uri = _payment_uri(amount_base_units)
+    qr = segno.make(payment_uri, error="h")  # high ECC — survives wallet-camera artifacts
     buf = io.BytesIO()
     qr.save(buf, kind="svg", scale=8, border=2)
     return templates.TemplateResponse(
         request=request,
         name="checkout.html",
-        context={"inv": inv, "qr_b64": base64.b64encode(buf.getvalue()).decode("ascii")},
+        context={
+            "inv": inv,
+            "qr_b64": base64.b64encode(buf.getvalue()).decode("ascii"),
+            "payment_uri": payment_uri,
+        },
     )
 
 

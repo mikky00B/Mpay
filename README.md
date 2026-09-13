@@ -17,6 +17,17 @@ A static wallet address doesn't survive contact with real volume:
 
 Mpay is the reliability core of a crypto invoicing platform — the part that isn't the checkout page.
 
+## Documentation
+
+| | |
+|---|---|
+| [Quickstart](docs/quickstart.md) | From `git clone` to a live invoice in ~10 minutes |
+| [API reference](docs/api.md) | Endpoints, semantics, error codes |
+| [Checkout & payment links](docs/checkout.md) | What payers see; the unique-amount matching model |
+| [Webhooks](docs/webhooks.md) | Events, HMAC verification, retry semantics, debugging |
+| [Operations](docs/operations.md) | Configuration, running as services, failure behavior |
+| [Brand](docs/brand.md) | Logo, palette, and typography specs |
+
 ## How a payment flows
 
 ```

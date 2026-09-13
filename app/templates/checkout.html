@@ -3,70 +3,196 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Invoice {{ inv.public_id[:8] }} — pay {{ inv.payable_amount }} {{ inv.token }}</title>
+<title>Invoice {{ inv.public_id[:8] }} · Mpay</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0;
-         background: #f6f7f9; color: #1a1f26; }
-  .card { max-width: 420px; margin: 6vh auto; background: #fff; border-radius: 12px;
-          padding: 32px; box-shadow: 0 4px 24px rgba(0,0,0,.08); }
-  h1 { font-size: 15px; font-weight: 600; color: #5b6673; margin: 0 0 4px; }
-  .amount { font-size: 34px; font-weight: 700; margin: 0 0 18px; }
-  .amount small { font-size: 16px; font-weight: 500; color: #5b6673; }
-  .badge { display: inline-block; padding: 4px 12px; border-radius: 999px;
-           font-size: 13px; font-weight: 600; letter-spacing: .3px; }
-  .AWAITING_PAYMENT { background: #fff4d6; color: #8a6100; }
-  .DETECTED, .CONFIRMING { background: #e0edff; color: #0b5ed7; }
-  .CONFIRMED, .SETTLED { background: #d6f5e0; color: #0a7d38; }
-  .EXPIRED { background: #fde0e0; color: #b02a2a; }
-  .qr { display: block; margin: 22px auto 8px; width: 220px; height: 220px; }
-  .hint { text-align: center; color: #5b6673; font-size: 13px; margin: 4px 0 18px; }
-  .addr { font-family: ui-monospace, monospace; font-size: 12px; word-break: break-all;
-          background: #f0f2f5; border-radius: 8px; padding: 10px; }
-  .row { display: flex; justify-content: space-between; font-size: 14px;
-         padding: 6px 0; color: #3c4653; }
-  .row span:first-child { color: #5b6673; }
-  @media (prefers-color-scheme: dark) {
-    body { background: #12161c; color: #e6eaef; }
-    .card { background: #1b2028; box-shadow: 0 4px 24px rgba(0,0,0,.4); }
-    .addr { background: #262c36; }
+  :root {
+    --bg: #eef0f4; --card: #ffffff; --ink: #161b22; --muted: #62708a;
+    --line: #e4e8ef; --accent: #4f46e5; --accent-soft: #eef0fe;
+    --ok: #0a7d38; --ok-soft: #dcf5e5; --warn-soft: #fff3d6; --warn: #8a6100;
+    --bad-soft: #fde3e3; --bad: #b02a2a; --radius: 18px;
   }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1116; --card: #171c24; --ink: #e8ecf2; --muted: #8b97ab;
+            --line: #262d38; --accent: #818cf8; --accent-soft: #232741;
+            --ok: #34d399; --ok-soft: #12331f; --warn-soft: #3a2f10; --warn: #fbbf24;
+            --bad-soft: #3b1515; --bad: #f87171; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--ink); min-height: 100vh; }
+  .wrap { max-width: 440px; margin: 0 auto; padding: 4vh 16px 40px; }
+  header { display: flex; align-items: center; gap: 8px; padding: 4px 6px 18px; }
+  .logo { width: 26px; height: 26px; border-radius: 8px; background: var(--accent);
+          color: #fff; font-weight: 800; font-size: 15px; display: flex;
+          align-items: center; justify-content: center; }
+  .brand { font-weight: 700; letter-spacing: .2px; }
+  .brand small { color: var(--muted); font-weight: 500; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+          padding: 26px 26px 22px; box-shadow: 0 10px 30px rgba(15,23,42,.06); }
+  .invoice-id { font-size: 12.5px; color: var(--muted); margin-bottom: 6px; }
+  .amount { font-size: 38px; font-weight: 800; letter-spacing: -.5px; line-height: 1.1; }
+  .amount small { font-size: 17px; font-weight: 600; color: var(--muted); margin-left: 4px; }
+  .desc { color: var(--muted); font-size: 14px; margin: 2px 0 14px; }
+  .badge { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px;
+           border-radius: 999px; font-size: 12.5px; font-weight: 700; letter-spacing: .4px; }
+  .badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+  .badge.pending { background: var(--warn-soft); color: var(--warn); }
+  .badge.progress { background: var(--accent-soft); color: var(--accent); }
+  .badge.done { background: var(--ok-soft); color: var(--ok); }
+  .badge.failed { background: var(--bad-soft); color: var(--bad); }
+  .badge.live::before { animation: pulse 1.4s infinite; }
+  @keyframes pulse { 50% { opacity: .25; } }
+
+  /* stepper */
+  .steps { display: flex; align-items: flex-start; margin: 22px 2px 8px; }
+  .step { flex: 1; text-align: center; font-size: 11px; color: var(--muted); position: relative; }
+  .step .dot { width: 22px; height: 22px; border-radius: 50%; border: 2px solid var(--line);
+               background: var(--card); margin: 0 auto 6px; display: flex; align-items: center;
+               justify-content: center; font-size: 11px; font-weight: 800; color: transparent; }
+  .step::before { content: ""; position: absolute; top: 10px; left: -50%; width: 100%;
+                  height: 2px; background: var(--line); z-index: 0; }
+  .step:first-child::before { display: none; }
+  .step.done .dot, .step.current .dot { border-color: var(--accent); background: var(--accent); color: #fff; z-index: 1; position: relative; }
+  .step.done::before, .step.current::before { background: var(--accent); }
+  .step.current { color: var(--ink); font-weight: 600; }
+
+  .qr-box { margin: 20px auto 6px; width: 232px; padding: 14px; background: #fff;
+            border: 1px solid var(--line); border-radius: 14px; }
+  .qr-box img { display: block; width: 100%; height: auto; }
+  .scan-hint { text-align: center; color: var(--muted); font-size: 13px; margin: 8px 0 4px; }
+  .scan-hint strong { color: var(--ink); }
+  .wallet-btn { display: block; text-align: center; margin: 12px auto 0; padding: 11px 18px;
+                background: var(--accent); color: #fff; font-weight: 700; font-size: 14px;
+                border-radius: 12px; text-decoration: none; }
+  .wallet-btn:hover { filter: brightness(1.08); }
+
+  .field { margin-top: 14px; }
+  .field label { font-size: 12px; color: var(--muted); display: block; margin-bottom: 5px; }
+  .addr { display: flex; align-items: center; gap: 8px; background: var(--bg);
+          border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+  .addr code { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 12px;
+               word-break: break-all; flex: 1; }
+  .copy { border: none; background: var(--accent-soft); color: var(--accent); font-weight: 700;
+          font-size: 12px; padding: 7px 10px; border-radius: 8px; cursor: pointer; flex-shrink: 0; }
+  .rows { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 6px; }
+  .row { display: flex; justify-content: space-between; font-size: 13.5px; padding: 7px 0; }
+  .row span:first-child { color: var(--muted); }
+  .timer { text-align: center; font-size: 12.5px; color: var(--muted); margin-top: 14px; }
+  .timer b { color: var(--ink); }
+  .paid-note { text-align: center; font-size: 15px; margin: 18px 0 4px; }
+  footer { text-align: center; color: var(--muted); font-size: 11.5px; margin-top: 18px; }
+  footer a { color: var(--muted); }
 </style>
 </head>
 <body>
-<div class="card">
-  <h1>Invoice #{{ inv.public_id[:8] }}{% if inv.description %} — {{ inv.description }}{% endif %}</h1>
-  <p class="amount">{{ inv.payable_amount }} <small>{{ inv.token }}</small></p>
-  <span class="badge {{ inv.status }}" id="status">{{ inv.status }}</span>
+<div class="wrap">
+  <header>
+    <div class="logo">M</div>
+    <div class="brand">Mpay <small>· crypto payments</small></div>
+  </header>
 
-  {% if inv.status in ('AWAITING_PAYMENT', 'DETECTED', 'CONFIRMING') %}
-  <img class="qr" src="data:image/svg+xml;base64,{{ qr_b64 }}"
-       alt="Scan to pay {{ inv.payable_amount }} {{ inv.token }}">
-  <p class="hint">Scan with your wallet — amount and token are pre-filled.
-     Send <strong>exactly</strong> {{ inv.payable_amount }} {{ inv.token }}.</p>
-  <div class="addr" id="addr">{{ inv.receiving_address }}</div>
-  {% elif inv.status == 'SETTLED' %}
-  <p class="hint">✅ Paid — thank you!</p>
-  {% elif inv.status == 'EXPIRED' %}
-  <p class="hint">This invoice has expired. Request a new one.</p>
-  {% else %}
-  <p class="hint">Payment received — waiting for network confirmations.</p>
-  {% endif %}
+  <div class="card">
+    <div class="invoice-id">Invoice #{{ inv.public_id[:8] }}</div>
+    <div class="amount">{{ inv.payable_amount }}<small>{{ inv.token }}</small></div>
+    {% if inv.description %}<div class="desc">{{ inv.description }}</div>{% endif %}
+    <span class="badge" id="status-badge" data-status="{{ inv.status }}"><span id="status-text">{{ inv.status }}</span></span>
 
-  <div class="row"><span>Network</span><span>{{ inv.chain }}</span></div>
-  <div class="row"><span>Requested</span><span>{{ inv.requested_amount }} {{ inv.token }}</span></div>
-  <div class="row"><span>Paid so far</span><span>{{ inv.paid_amount }} {{ inv.token }}</span></div>
-  {% if inv.expires_at %}<div class="row"><span>Expires</span><span>{{ inv.expires_at }}</span></div>{% endif %}
+    <div class="steps" id="steps">
+      <div class="step" data-s="0"><div class="dot">✓</div>Waiting</div>
+      <div class="step" data-s="1"><div class="dot">✓</div>Detected</div>
+      <div class="step" data-s="2"><div class="dot">✓</div>Confirming</div>
+      <div class="step" data-s="3"><div class="dot">✓</div>Confirmed</div>
+    </div>
+
+    <div id="pay-area">
+      <div class="qr-box"><img src="data:image/svg+xml;base64,{{ qr_b64 }}" alt="Payment QR"></div>
+      <p class="scan-hint">Scan with your wallet — it will pre-fill<br><strong>exactly {{ inv.payable_amount }} {{ inv.token }}</strong> on {{ inv.chain }}</p>
+      <a class="wallet-btn" href="{{ payment_uri }}">Open in wallet app</a>
+      <div class="field">
+        <label>Receiving address ({{ inv.chain }})</label>
+        <div class="addr">
+          <code id="addr">{{ inv.receiving_address }}</code>
+          <button class="copy" id="copy-btn" onclick="copyAddr()">Copy</button>
+        </div>
+      </div>
+      {% if inv.expires_at %}<div class="timer" id="timer"></div>{% endif %}
+    </div>
+
+    <div class="paid-note" id="paid-note" style="display:none">✅ Payment complete — thank you!</div>
+    <div class="paid-note" id="expired-note" style="display:none">This invoice has expired. Please request a new one.</div>
+
+    <div class="rows">
+      <div class="row"><span>Network</span><span>{{ inv.chain }}</span></div>
+      <div class="row"><span>Requested</span><span>{{ inv.requested_amount }} {{ inv.token }}</span></div>
+      <div class="row"><span>Paid so far</span><span>{{ inv.paid_amount }} {{ inv.token }}</span></div>
+      <div class="row"><span>Created</span><span>{{ inv.created_at }}</span></div>
+    </div>
+  </div>
+  <footer>Settlement verified on-chain · powered by <a href="/">Mpay</a></footer>
 </div>
+
 <script>
-  // Poll the public status endpoint; stop once the invoice is terminal.
-  (function poll() {
-    fetch('/invoices/{{ inv.public_id }}').then(r => r.json()).then(d => {
-      const s = d.invoice.status, el = document.getElementById('status');
-      if (el && s !== el.textContent) { location.reload(); return; }
-      if (s !== 'SETTLED' && s !== 'EXPIRED') setTimeout(poll, 5000);
-    }).catch(() => setTimeout(poll, 5000));
+  const STATUS = "{{ inv.status }}";
+  const STEP = { AWAITING_PAYMENT: 0, DETECTED: 1, CONFIRMING: 2, CONFIRMED: 3, SETTLED: 3 };
+  const BADGE = { AWAITING_PAYMENT: ["pending", "Waiting for payment"],
+                  DETECTED: ["progress live", "Payment detected"],
+                  CONFIRMING: ["progress live", "Confirming on-chain"],
+                  CONFIRMED: ["done", "Confirmed"],
+                  SETTLED: ["done", "Paid"],
+                  EXPIRED: ["failed", "Expired"] };
+
+  function render() {
+    const badge = document.getElementById("status-badge");
+    const [cls, text] = BADGE[STATUS] || ["progress", STATUS];
+    badge.classList.add(...cls.split(" "));
+    document.getElementById("status-text").textContent = text;
+    const payArea = document.getElementById("pay-area");
+    if (STATUS === "EXPIRED") {
+      payArea.style.display = "none";
+      document.getElementById("expired-note").style.display = "block";
+      return;
+    }
+    if (STATUS === "SETTLED") {
+      payArea.style.display = "none";
+      document.getElementById("paid-note").style.display = "block";
+    }
+    const cur = STEP[STATUS] ?? 0;
+    document.querySelectorAll(".step").forEach(el => {
+      const s = +el.dataset.s;
+      el.classList.toggle("done", s < cur || STATUS === "SETTLED");
+      el.classList.toggle("current", s === cur && STATUS !== "SETTLED");
+    });
+  }
+
+  function copyAddr() {
+    navigator.clipboard.writeText(document.getElementById("addr").textContent.trim())
+      .then(() => { const b = document.getElementById("copy-btn");
+                    b.textContent = "Copied ✓"; setTimeout(() => b.textContent = "Copy", 1600); });
+  }
+
+  (function timer() {
+    const el = document.getElementById("timer");
+    const exp = "{{ inv.expires_at }}";
+    if (!el || !exp) return;
+    const tick = () => {
+      const left = new Date(exp) - new Date();
+      if (left <= 0) { location.reload(); return; }
+      const m = Math.floor(left / 60000), s = Math.floor(left % 60000 / 1000);
+      el.innerHTML = "Invoice expires in <b>" + m + "m " + String(s).padStart(2, "0") + "s</b>";
+      setTimeout(tick, 1000);
+    };
+    tick();
   })();
+
+  (function poll() {
+    if (STATUS === "SETTLED" || STATUS === "EXPIRED") return;
+    fetch("/invoices/{{ inv.public_id }}").then(r => r.json()).then(d => {
+      if (d.invoice.status !== STATUS) { location.reload(); return; }
+      setTimeout(poll, 4000);
+    }).catch(() => setTimeout(poll, 6000));
+  })();
+
+  render();
 </script>
 </body>
 </html>
