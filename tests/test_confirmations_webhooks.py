@@ -201,3 +201,85 @@ def test_payload_signature_is_verifiable_hmac(db_url):
     assert inv.status is InvoiceStatus.SETTLED
 
 
+# --------------------------------------------------------------------------
+# [D22] SSRF guard: merchants must not be able to reach our internal network
+# through webhook_url.
+# --------------------------------------------------------------------------
+
+def test_host_is_private_unit():
+    from app.webhooks import host_is_private
+
+    assert host_is_private("http://127.0.0.1:9801/hook")
+    assert host_is_private("http://10.1.2.3/hook")
+    assert host_is_private("http://172.16.5.5/hook")
+    assert host_is_private("http://192.168.0.1/hook")
+    assert host_is_private("http://169.254.169.254/latest/meta-data")  # cloud metadata
+    assert host_is_private("http://[::1]:8080/hook")
+    # Unresolvable host: NOT flagged — the HTTP client's own ConnectError
+    # reports that failure path; also what the test mocks rely on.
+    assert not host_is_private("http://hooks.test/acme")
+
+
+def test_private_webhook_target_blocked_at_delivery(db_url):
+    """Loopback target: the delivery fails TERMINALLY (no retry rows — a
+    private target never becomes reachable by retrying) and the invoice is
+    honestly left un-settled."""
+    db = _session(db_url)
+    m, inv = _confirmed_invoice(db, url="http://127.0.0.1:9999/hook")
+
+    def must_not_post(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("HTTP client must not be reached for blocked targets")
+
+    dispatch_due_deliveries(db, http_client=_client(must_not_post))
+    rows = db.execute(select(WebhookDelivery)).scalars().all()
+    assert len(rows) == 1 and rows[0].status is DeliveryStatus.FAILED
+    assert "SSRF" in rows[0].error
+    db.refresh(inv)
+    assert inv.status is InvoiceStatus.CONFIRMED
+
+
+def test_allow_private_hosts_flag_stands_down(db_url, monkeypatch):
+    """Dev flag: with WEBHOOK_ALLOW_PRIVATE_HOSTS the guard stands down and
+    the normal delivery path (here: connect refused) runs instead."""
+    monkeypatch.setenv("WEBHOOK_ALLOW_PRIVATE_HOSTS", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    db = _session(db_url)
+    m, inv = _confirmed_invoice(db, url="http://127.0.0.1:9999/hook")
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        raise httpx.ConnectError("connection refused")
+
+    dispatch_due_deliveries(db, http_client=_client(handler))
+    rows = db.execute(select(WebhookDelivery)).scalars().all()
+    assert calls["n"] == 1  # the HTTP client WAS reached
+    assert rows[0].status is DeliveryStatus.FAILED
+    assert "SSRF" not in (rows[0].error or "")
+
+
+def test_hostname_resolution_is_checked(db_url, monkeypatch):
+    """Non-literal hosts are resolved; private results are blocked too (a
+    hostname that resolves into 10/8 is just as internal as a literal IP)."""
+    monkeypatch.setattr(
+        "app.webhooks.socket.getaddrinfo",
+        lambda host, *a, **k: [(2, 1, 6, "", ("10.0.0.5", 0))],
+    )
+    db = _session(db_url)
+    m, inv = _confirmed_invoice(db, url="http://internal.corp/hook")
+
+    dispatch_due_deliveries(db, http_client=_client(lambda r: httpx.Response(200)))
+    rows = db.execute(select(WebhookDelivery)).scalars().all()
+    assert rows[0].status is DeliveryStatus.FAILED and "SSRF" in rows[0].error
+
+
+def test_creation_rejects_private_webhook_url(client):
+    """Fail at onboarding too: a private webhook_url is rejected 422."""
+    r = client.post("/merchants", json={"name": "Evil", "webhook_url": "http://127.0.0.1:9801/hook"})
+    assert r.status_code == 422
+    r = client.post("/merchants", json={"name": "Ok", "webhook_url": ""})
+    assert r.status_code == 201
+
+

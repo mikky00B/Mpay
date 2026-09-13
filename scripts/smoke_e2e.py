@@ -66,7 +66,10 @@ def main() -> int:
            # INTERNAL_API_KEY is pinned: pydantic-settings also reads .env, and
            # the developer's real key there would 401 the watcher's ingest.
            "RECEIVING_ADDRESS": HOT, "USDC_CONTRACT": USDC,
-           "RPC_URL": "http://127.0.0.1:8555", "INTERNAL_API_KEY": API_KEY}
+           "RPC_URL": "http://127.0.0.1:8555", "INTERNAL_API_KEY": API_KEY,
+           # The mock webhook receiver runs on loopback — the SSRF guard [D22]
+           # must be relaxed for this rig only.
+           "WEBHOOK_ALLOW_PRIVATE_HOSTS": "true"}
     api_err = open(os.path.join(ROOT, "api_stderr.txt"), "w")
     api_proc = subprocess.Popen(
         [os.path.join(ROOT, ".venv", "Scripts", "python.exe"), "-m", "uvicorn", "app.main:app",

@@ -19,9 +19,12 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import json
 import logging
+import socket
 from datetime import timedelta
+from urllib.parse import urlparse
 
 import httpx
 from sqlalchemy import select
@@ -41,6 +44,40 @@ from app.state_machine import transition
 log = logging.getLogger(__name__)
 
 SIGNATURE_HEADER = "X-Mpay-Signature"
+
+
+def host_is_private(url: str) -> bool:
+    """SSRF guard [D22]: True if the URL's host is (or resolves to) a
+    private / loopback / link-local address — i.e. a target a merchant could
+    use to reach our own network. Unresolvable hosts are NOT flagged: the
+    HTTP client's own ConnectError reports that failure path as before.
+    Literal IPs skip DNS entirely."""
+    try:
+        host = (urlparse(url).hostname or "").strip("[]")
+    except ValueError:
+        return True  # unparseable URL — treat as unsafe
+    if not host:
+        return True
+    try:
+        ips = [ipaddress.ip_address(host)]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, None)
+        except socket.gaierror:
+            return False
+        except Exception:
+            return False
+        ips = []
+        for info in infos:
+            try:
+                ips.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                continue
+    return any(
+        ip.is_private or ip.is_loopback or ip.is_link_local
+        or ip.is_unspecified or ip.is_reserved
+        for ip in ips
+    )
 
 
 def sign(secret: str, body: bytes) -> str:
@@ -124,6 +161,17 @@ def dispatch_due_deliveries(db: Session, http_client: httpx.Client | None = None
                 d.status = DeliveryStatus.FAILED
                 d.error = "merchant has no webhook URL configured"
                 db.commit()
+                continue
+
+            # SSRF guard [D22]: a private target can NEVER become reachable by
+            # retrying, so this is a terminal failure — no retry row is spawned.
+            if not s.webhook_allow_private_hosts and host_is_private(merchant.webhook_url):
+                d.status = DeliveryStatus.FAILED
+                d.error = ("webhook URL blocked by SSRF guard: host is private/"
+                           "loopback — the merchant must reconfigure it")
+                db.commit()
+                log.warning("webhook attempt %s blocked: private target %r",
+                            d.id, merchant.webhook_url)
                 continue
 
             ok, code, err = False, None, None

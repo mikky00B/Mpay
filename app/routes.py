@@ -148,6 +148,14 @@ def _authorize_merchant(db: Session, merchant_id: int,
 @router.post("/merchants", status_code=201)
 def create_merchant(body: MerchantCreate, db: Session = Depends(get_db)):
     """Create a merchant. Secrets are returned ONCE — store them."""
+    from app.webhooks import host_is_private
+
+    s = get_settings()
+    if body.webhook_url and not s.webhook_allow_private_hosts and host_is_private(body.webhook_url):
+        raise HTTPException(
+            422, "webhook_url points at a private/loopback address — "
+                 "publicly reachable HTTPS endpoints only"
+        )
     secret = "whsec_" + _secrets.token_hex(24)
     api_key = "mpay_sk_" + _secrets.token_hex(24)
     m = Merchant(

@@ -56,6 +56,9 @@ class Settings(BaseSettings):
     webhook_backoff_base_seconds: float = 2.0
     webhook_backoff_cap_seconds: float = 60.0
     webhook_timeout_seconds: float = 10.0
+    # SSRF guard [D22]: block webhook delivery to private/loopback ranges.
+    # Enable ONLY for dev rigs whose mock webhook receiver runs on localhost.
+    webhook_allow_private_hosts: bool = False
 
     model_config = {"env_file": ".env", "extra": "ignore"}
 
