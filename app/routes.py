@@ -257,20 +257,32 @@ def get_invoice(public_id: str, db: Session = Depends(get_db)):
     return {"invoice": invoice_out(inv), "payments": payments}
 
 
+def _payment_uri(amount_base_units: int) -> str:
+    """EIP-681 payment URI for the hot address [D21]:
+    ethereum:<token>@<chainId>/transfer?address=<recipient>&uint256=<base units>
+    The @chainId qualifier is NOT optional — without it the URI defaults to
+    mainnet (chain 1) and a Sepolia deployment's QR points wallets at the
+    wrong network."""
+    s = get_settings()
+    return (
+        f"ethereum:{s.usdc_contract}@{s.chain_id}/transfer"
+        f"?address={s.receiving_address}"
+        f"&uint256={amount_base_units}"
+    )
+
+
 @router.get("/pay/{public_id}", response_class=HTMLResponse)
 def checkout_page(public_id: str, request: Request, db: Session = Depends(get_db)):
     """Hosted checkout [D21]: the payment link is this URL. Renders ONLY the
     public invoice fields (same visibility as GET /invoices/{public_id}) — no
     merchant internals, no secrets. The QR encodes an EIP-681 payment URI so
-    wallet apps pre-fill the token contract and the exact payable amount."""
+    wallet apps pre-fill the token contract, the CHAIN, and the exact
+    payable amount."""
     inv = get_invoice(public_id, db)["invoice"]
-    # EIP-681: ethereum:<token>/transfer?address=<recipient>&uint256=<base units>
-    uri = (
-        f"ethereum:{get_settings().usdc_contract}/transfer"
-        f"?address={inv['receiving_address']}"
-        f"&uint256={money.parse_amount_to_base_units(inv['payable_amount'])}"
+    qr = segno.make(
+        _payment_uri(money.parse_amount_to_base_units(inv["payable_amount"])),
+        error="h",  # high ECC — survives wallet-camera artifacts
     )
-    qr = segno.make(uri, error="h")  # high ECC — survives wallet-camera artifacts
     buf = io.BytesIO()
     qr.save(buf, kind="svg", scale=8, border=2)
     return templates.TemplateResponse(

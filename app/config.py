@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     receiving_address: str = "0x0000000000000000000000000000000000000000"
     # USDC contract on Ethereum mainnet; tests override with a fake address.
     usdc_contract: str = "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+    # EVM chain id — MUST match the network the RPC/USDC contract belong to.
+    # Encoded into EIP-681 payment URIs: without @chainId a URI defaults to
+    # mainnet (chain 1), so a Sepolia deployment's QR silently pointed wallets
+    # at the wrong network.
+    chain_id: int = 1
     # Confirmations required before an invoice flips CONFIRMING -> CONFIRMED.
     confirmation_threshold: int = 12
     # Shared secret between the watcher and the internal ingest API (D5).

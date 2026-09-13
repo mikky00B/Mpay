@@ -378,3 +378,23 @@ def test_checkout_page_renders_public_fields_and_qr(client, merchant):
 
 def test_checkout_page_404_for_unknown_invoice(client):
     assert client.get("/pay/doesnotexist").status_code == 404
+
+
+def test_checkout_qr_uri_carries_chain_id(client, merchant, db_url, monkeypatch):
+    """EIP-681: WITHOUT @chainId the URI defaults to MAINNET — a Sepolia
+    deployment's QR once silently pointed wallets at the wrong network.
+    The chain_id setting must appear in the payment URI."""
+    from app.config import get_settings
+    from app.routes import _payment_uri
+
+    monkeypatch.setenv("CHAIN_ID", "11155111")
+    get_settings.cache_clear()
+    try:
+        uri = _payment_uri(3_500_006)
+        usdc = get_settings().usdc_contract
+        assert uri == (
+            f"ethereum:{usdc}@11155111/transfer"
+            f"?address=0xhot000000000000000000000000000000000009&uint256=3500006"
+        )
+    finally:
+        get_settings.cache_clear()
