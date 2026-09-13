@@ -71,6 +71,9 @@ class Merchant(Base):
     # Webhook target + HMAC secret (shown once at creation, stored hashed in prod)
     webhook_url: Mapped[str] = mapped_column(String(500), default="")
     webhook_secret: Mapped[str] = mapped_column(String(120))
+    # SHA-256 hash of the merchant's API key [D20] — the raw key is shown once
+    # at creation and never stored. Nullable: pre-[D20] merchants have none.
+    api_key_hash: Mapped[str | None] = mapped_column(String(120), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     invoices: Mapped[list[Invoice]] = relationship(back_populates="merchant")

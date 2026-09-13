@@ -1,18 +1,26 @@
 """HTTP API (build step 2) — merchants, invoices, internal ingest, delivery log.
 
 Public surface:
-- POST /merchants                       create merchant (webhook secret shown once)
+- POST /merchants                       create merchant (secrets shown once)
 - POST /merchants/{id}/invoices         create invoice (idempotent via key)
-- GET  /invoices/{public_id}            invoice status + payments
+- GET  /invoices/{public_id}            invoice status + payments (public —
+                                        public_id is the capability; the
+                                        checkout page depends on it)
 - GET  /merchants/{id}/invoices         list invoices
 - GET  /merchants/{id}/deliveries       webhook delivery log (plan.md requirement)
 - POST /internal/events                 watcher ingest [D5], X-Internal-Key guarded
 - GET  /health
+- GET  /pay/{public_id}                 hosted checkout page [D21]
+
+Merchant-scoped endpoints require X-API-Key [D20]; /internal/events stays on
+X-Internal-Key (watcher trust domain).
 
 Money crosses the API only as decimal strings [D4]; conversion is exact.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
 import logging
 import secrets as _secrets
 from datetime import timedelta
@@ -100,13 +108,45 @@ class IngestBatch(BaseModel):
     events: list[ChainEventIn] = Field(min_length=1, max_length=500)
 
 
+# ----------------------------------------------------------------------- auth
+
+def _hash_api_key(key: str) -> str:
+    """SHA-256 of an API key [D20] — high-entropy random keys don't need a
+    slow KDF; what matters is that the raw key is never stored."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest()
+
+
+def _authorize_merchant(db: Session, merchant_id: int,
+                        x_api_key: str | None) -> Merchant:
+    """X-API-Key auth [D20]. 404 for unknown merchants; 401 for missing or
+    invalid keys — the key does not identify the caller, it is simply checked
+    against the merchant named in the path, in constant time."""
+    merchant = db.get(Merchant, merchant_id)
+    if merchant is None:
+        raise HTTPException(404, "merchant not found")
+    provided = (x_api_key or "").strip()
+    if (
+        not provided
+        or merchant.api_key_hash is None
+        or not hmac.compare_digest(merchant.api_key_hash, _hash_api_key(provided))
+    ):
+        raise HTTPException(401, "missing or invalid API key")
+    return merchant
+
+
 # -------------------------------------------------------------------- routes
 
 @router.post("/merchants", status_code=201)
 def create_merchant(body: MerchantCreate, db: Session = Depends(get_db)):
-    """Create a merchant. The webhook secret is returned ONCE — store it."""
+    """Create a merchant. Secrets are returned ONCE — store them."""
     secret = "whsec_" + _secrets.token_hex(24)
-    m = Merchant(name=body.name, webhook_url=body.webhook_url, webhook_secret=secret)
+    api_key = "mpay_sk_" + _secrets.token_hex(24)
+    m = Merchant(
+        name=body.name,
+        webhook_url=body.webhook_url,
+        webhook_secret=secret,
+        api_key_hash=_hash_api_key(api_key),
+    )
     db.add(m)
     db.flush()
     return {
@@ -114,16 +154,17 @@ def create_merchant(body: MerchantCreate, db: Session = Depends(get_db)):
         "name": m.name,
         "webhook_url": m.webhook_url,
         "webhook_secret": secret,  # shown once; rotate = new secret
+        "api_key": api_key,        # shown once; stored only as a SHA-256 hash
     }
 
 
 @router.post("/merchants/{merchant_id}/invoices", status_code=201)
-def create_invoice(merchant_id: int, body: InvoiceCreate, db: Session = Depends(get_db)):
+def create_invoice(merchant_id: int, body: InvoiceCreate,
+                   db: Session = Depends(get_db),
+                   x_api_key: str | None = Header(default=None)):
     """Create an invoice. Idempotent on `idempotency_key` per merchant."""
     s = get_settings()
-    merchant = db.get(Merchant, merchant_id)
-    if merchant is None:
-        raise HTTPException(404, "merchant not found")
+    _authorize_merchant(db, merchant_id, x_api_key)
 
     if body.idempotency_key:
         existing = db.execute(
@@ -200,9 +241,9 @@ def get_invoice(public_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/merchants/{merchant_id}/invoices")
-def list_invoices(merchant_id: int, db: Session = Depends(get_db)):
-    if db.get(Merchant, merchant_id) is None:
-        raise HTTPException(404, "merchant not found")
+def list_invoices(merchant_id: int, db: Session = Depends(get_db),
+                  x_api_key: str | None = Header(default=None)):
+    _authorize_merchant(db, merchant_id, x_api_key)
     invs = db.execute(
         select(Invoice).where(Invoice.merchant_id == merchant_id).order_by(Invoice.id.desc())
     ).scalars().all()
@@ -210,10 +251,10 @@ def list_invoices(merchant_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/merchants/{merchant_id}/deliveries")
-def list_deliveries(merchant_id: int, db: Session = Depends(get_db)):
+def list_deliveries(merchant_id: int, db: Session = Depends(get_db),
+                    x_api_key: str | None = Header(default=None)):
     """Full webhook delivery log — the debugging surface required by plan.md."""
-    if db.get(Merchant, merchant_id) is None:
-        raise HTTPException(404, "merchant not found")
+    _authorize_merchant(db, merchant_id, x_api_key)
     rows = db.execute(
         select(WebhookDelivery)
         .where(WebhookDelivery.merchant_id == merchant_id)

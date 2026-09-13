@@ -11,10 +11,49 @@ def merchant(client):
     return r.json()
 
 
+def _auth(merchant) -> dict:
+    """X-API-Key header for a merchant fixture [D20]."""
+    return {"X-API-Key": merchant["api_key"]}
+
+
+def test_merchant_scoped_endpoints_require_api_key(client, merchant):
+    """[D20]: no key, wrong key -> 401; unknown merchant -> 404."""
+    r = client.post(f"/merchants/{merchant['id']}/invoices", json={"amount": "5"})
+    assert r.status_code == 401
+    r = client.post(f"/merchants/{merchant['id']}/invoices", json={"amount": "5"},
+                    headers={"X-API-Key": "mpay_sk_wrong"})
+    assert r.status_code == 401
+    r = client.get(f"/merchants/{merchant['id']}/deliveries")
+    assert r.status_code == 401
+    r = client.get("/merchants/999/deliveries", headers=_auth(merchant))
+    assert r.status_code == 404
+    # Public endpoints stay keyless by design:
+    r = client.post("/merchants", json={"name": "Open"})
+    assert r.status_code == 201
+
+
+def test_api_key_is_never_stored_raw(client, merchant, db_url):
+    """[D20]: only the SHA-256 hash is persisted; the raw key exists solely in
+    the creation response."""
+    import hashlib
+
+    from sqlalchemy import select
+    from app.db import get_sessionmaker
+    from app.models import Merchant
+
+    with get_sessionmaker(db_url)() as db:
+        row = db.execute(
+            select(Merchant.api_key_hash).where(Merchant.id == merchant["id"])
+        ).scalar_one()
+    assert row != merchant["api_key"]
+    assert row == hashlib.sha256(merchant["api_key"].encode()).hexdigest()
+
+
 def test_create_invoice_returns_payable_amount(client, merchant):
     r = client.post(
         f"/merchants/{merchant['id']}/invoices",
         json={"amount": "25.50", "description": "Order #42"},
+        headers=_auth(merchant),
     )
     assert r.status_code == 201, r.text
     inv = r.json()["invoice"]
@@ -27,8 +66,9 @@ def test_create_invoice_returns_payable_amount(client, merchant):
 
 def test_invoice_creation_idempotent_on_key(client, merchant):
     body = {"amount": "10", "idempotency_key": "order-42"}
-    r1 = client.post(f"/merchants/{merchant['id']}/invoices", json=body)
-    r2 = client.post(f"/merchants/{merchant['id']}/invoices", json=body)
+    h = _auth(merchant)
+    r1 = client.post(f"/merchants/{merchant['id']}/invoices", json=body, headers=h)
+    r2 = client.post(f"/merchants/{merchant['id']}/invoices", json=body, headers=h)
     assert r1.status_code == 201 and r2.status_code == 201
     assert r1.json()["invoice"]["public_id"] == r2.json()["invoice"]["public_id"]
     assert r2.json()["idempotent_replay"] is True
@@ -69,10 +109,11 @@ def test_ingest_dedupes_on_tx_log_index(client):
 # open invoices, and the partial unique index must reject duplicates loudly.
 # --------------------------------------------------------------------------
 
-def _mk_invoice(client, merchant_id, amount, key=None):
+def _mk_invoice(client, merchant, amount, key=None):
     r = client.post(
-        f"/merchants/{merchant_id}/invoices",
+        f"/merchants/{merchant['id']}/invoices",
         json={"amount": amount, **({"idempotency_key": key} if key else {})},
+        headers=_auth(merchant),
     )
     assert r.status_code == 201, r.text
     return r.json()["invoice"]
@@ -128,8 +169,8 @@ def test_offsets_900_ids_apart_do_not_collide(client, merchant, db_url):
     assert len(set(amounts)) == 2, f"seeded payables collide: {amounts}"
     # And via the API: two fresh invoices share requested amount -> distinct
     # payables, since ids are unique.
-    inv1 = _mk_invoice(client, merchant["id"], "10", key="k1")
-    inv2 = _mk_invoice(client, merchant["id"], "10", key="k2")
+    inv1 = _mk_invoice(client, merchant, "10", key="k1")
+    inv2 = _mk_invoice(client, merchant, "10", key="k2")
     a1 = _to_base_units(inv1["payable_amount"])
     a2 = _to_base_units(inv2["payable_amount"])
     assert a1 != a2, f"payables collided: {a1} vs {a2}"
@@ -165,7 +206,8 @@ def test_duplicate_open_address_amount_rejected_by_index(client, merchant, db_ur
     from app import money
 
     requested = money.base_units_to_decimal_string(amount - 2)
-    r = client.post(f"/merchants/{merchant['id']}/invoices", json={"amount": requested})
+    r = client.post(f"/merchants/{merchant['id']}/invoices", json={"amount": requested},
+                    headers=_auth(merchant))
     assert r.status_code == 409, f"expected 409, got {r.status_code}: {r.text}"
     # And the seeded open invoice is untouched (exactly one row at that key).
     with get_sessionmaker(db_url)() as db:
@@ -203,7 +245,8 @@ def test_settled_invoice_amount_can_repeat(client, merchant, db_url):
         )
     # New API invoice: id=2 -> offset 2 -> payable 9_000_000 + 2 = same key as
     # the settled row. Must be ALLOWED (the partial index ignores SETTLED).
-    r = client.post(f"/merchants/{merchant['id']}/invoices", json={"amount": "9"})
+    r = client.post(f"/merchants/{merchant['id']}/invoices", json={"amount": "9"},
+                    headers=_auth(merchant))
     assert r.status_code == 201, r.text
     with get_sessionmaker(db_url)() as db:
         open_rows = db.execute(
@@ -242,6 +285,7 @@ def test_mixed_case_settings_address_is_normalized_and_credits(client, merchant,
         r = client.post(
             f"/merchants/{merchant['id']}/invoices",
             json={"amount": "7.5", "idempotency_key": "case-1"},
+            headers=_auth(merchant),
         )
         assert r.status_code == 201, r.text
         inv = r.json()["invoice"]

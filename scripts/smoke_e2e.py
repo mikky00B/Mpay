@@ -99,8 +99,10 @@ def main() -> int:
 def _scenario() -> bool:
     m = api("POST", "/merchants", {"name": "Smoke", "webhook_url": "http://127.0.0.1:9801/hook"})
     chain_state["secret"] = m["webhook_secret"]
+    auth = {"X-API-Key": m["api_key"]}  # [D20] merchant-scoped endpoints need a key
     inv = api("POST", f"/merchants/{m['id']}/invoices",
-              {"amount": "25.50", "description": "smoke order", "idempotency_key": "smoke-1"})["invoice"]
+              {"amount": "25.50", "description": "smoke order", "idempotency_key": "smoke-1"},
+              headers=auth)["invoice"]
     payable = int(Decimal(inv["payable_amount"]) * 1_000_000)
     log(f"invoice {inv['public_id'][:8]}… payable={inv['payable_amount']} ({payable} base) status={inv['status']}")
     if inv["status"] != "AWAITING_PAYMENT":

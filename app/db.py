@@ -57,6 +57,10 @@ def ensure_schema(engine: Engine | None = None) -> None:
             conn.execute(text("ALTER TABLE payments ADD COLUMN orphaned_at DATETIME"))
         except Exception:  # column already exists (or fresh DB without the table)
             pass
+        try:
+            conn.execute(text("ALTER TABLE merchants ADD COLUMN api_key_hash VARCHAR(120)"))
+        except Exception:
+            pass
 
 
 def get_db() -> Iterator[Session]:
