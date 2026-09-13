@@ -76,9 +76,14 @@ Create a merchant and an invoice:
 ```bash
 curl -X POST http://127.0.0.1:8000/merchants -H "Content-Type: application/json" \
   -d '{"name":"Acme","webhook_url":"https://your-endpoint/hook"}'
+# -> {"id":1, ..., "webhook_secret":"whsec_...", "api_key":"mpay_sk_..."}   (shown ONCE)
+
 curl -X POST http://127.0.0.1:8000/merchants/1/invoices -H "Content-Type: application/json" \
+     -H "X-API-Key: mpay_sk_..." \
   -d '{"amount":"25.50","idempotency_key":"order-42"}'
 ```
+
+Merchant-scoped endpoints require the `X-API-Key` header (keys are stored hashed; the raw value is shown once at creation). The invoice response includes a `public_id` — the hosted checkout page for that invoice lives at **`/pay/{public_id}`**: a payment link with a scannable EIP-681 QR (wallet apps pre-fill token and exact amount) and live status.
 
 The response's `payable_amount` is what the payer sends — the per-invoice unique amount is the matching key. When the transfer confirms, `https://your-endpoint/hook` receives a signed `invoice.confirmed`.
 
@@ -107,6 +112,7 @@ All settings are environment variables (see `app/config.py`); none are required 
 | `INTERNAL_API_KEY` | `dev-internal-key` | Shared secret between watcher and ingest API |
 | `WEBHOOK_MAX_ATTEMPTS` / `WEBHOOK_BACKOFF_*` | `5` / `2s, cap 60s` | Delivery retry policy |
 | `REORG_SAFETY_DEPTH` | `60` | Window in which a vanished payment is rolled back |
+| `WEBHOOK_ALLOW_PRIVATE_HOSTS` | `false` | SSRF guard escape hatch — loopback webhook targets (dev rigs only) |
 
 ## Testing
 
@@ -130,7 +136,7 @@ The smoke test drives the actual binaries end-to-end — invoice → on-chain tr
 - [x] Exactly-once event processing, confirmation tracking, signed webhook delivery
 - [x] Reconciliation job (stuck-confirmation rescue, chain cross-check)
 - [x] Reorg handling (payment rollback + merchant notification)
-- [ ] Merchant API keys + hosted checkout page (payment link with QR)
+- [x] Merchant API keys + hosted checkout page (payment link with QR)
 - [ ] Over/underpayment policy
 - [ ] Second token / chain
 
