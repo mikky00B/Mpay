@@ -55,7 +55,9 @@ def client(db_url):
     """TestClient over the routes WITHOUT background loops (lifespan off)."""
     from app.routes import router
 
-    app = FastAPI()
+    # docs_url="/api-docs" mirrors app.main.create_app: /docs is the human
+    # documentation site, not the default Swagger mount.
+    app = FastAPI(docs_url="/api-docs")
     app.include_router(router)
     with TestClient(app) as c:
         yield c

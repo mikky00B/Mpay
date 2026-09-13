@@ -21,6 +21,7 @@ Mpay is the reliability core of a crypto invoicing platform — the part that is
 
 | | |
 |---|---|
+| **[Live documentation site](http://localhost:8000/docs)** | Served by every Mpay instance at `/docs` — guides, API reference, search |
 | [Quickstart](docs/quickstart.md) | From `git clone` to a live invoice in ~10 minutes |
 | [API reference](docs/api.md) | Endpoints, semantics, error codes |
 | [Checkout & payment links](docs/checkout.md) | What payers see; the unique-amount matching model |

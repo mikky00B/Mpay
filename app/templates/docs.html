@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }} · Mpay Docs</title>
+<style>
+  :root {
+    --bg: #ffffff; --ink: #161b22; --muted: #62708a; --line: #e4e8ef;
+    --accent: #4f46e5; --accent-soft: #eef0fe; --code-bg: #f6f8fa;
+    --side-bg: #fbfcfe; --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #0e1116; --ink: #e8ecf2; --muted: #8b97ab; --line: #262d38;
+            --accent: #818cf8; --accent-soft: #232741; --code-bg: #1a2029;
+            --side-bg: #12161d; }
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body { margin: 0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         background: var(--bg); color: var(--ink); }
+
+  .layout { display: flex; min-height: 100vh; }
+  aside { width: 264px; flex-shrink: 0; border-right: 1px solid var(--line);
+          background: var(--side-bg); padding: 22px 16px; position: sticky;
+          top: 0; height: 100vh; overflow-y: auto; }
+  .side-brand { display: flex; align-items: center; gap: 9px; padding: 0 8px 20px;
+                text-decoration: none; color: var(--ink); }
+  .side-brand .mark { width: 28px; height: 28px; border-radius: 8px; background: var(--accent);
+                      color: #fff; font-weight: 800; font-size: 15px; display: flex;
+                      align-items: center; justify-content: center; }
+  .side-brand .name { font-weight: 700; font-size: 16px; }
+  .side-brand .name small { display: block; color: var(--muted); font-weight: 500; font-size: 11px; }
+
+  .search { position: relative; margin: 0 4px 14px; }
+  .search input { width: 100%; padding: 9px 12px; border: 1px solid var(--line);
+                  border-radius: 10px; background: var(--bg); color: var(--ink);
+                  font-size: 13.5px; outline: none; }
+  .search input:focus { border-color: var(--accent); }
+  .results { position: absolute; left: 0; right: 0; top: 40px; background: var(--bg);
+             border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.12);
+             max-height: 340px; overflow-y: auto; z-index: 10; display: none; }
+  .results a { display: block; padding: 9px 12px; text-decoration: none; color: var(--ink); }
+  .results a:hover { background: var(--accent-soft); }
+  .results .rt { font-weight: 600; font-size: 13px; }
+  .results .rs { font-size: 12px; color: var(--muted); margin-top: 2px;
+                 overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  nav a { display: block; padding: 7px 12px; border-radius: 8px; color: var(--muted);
+          text-decoration: none; font-size: 13.5px; font-weight: 500; margin: 1px 0; }
+  nav a:hover { color: var(--ink); background: var(--accent-soft); }
+  nav a.active { color: var(--accent); background: var(--accent-soft); font-weight: 700; }
+  .side-foot { margin-top: 18px; padding: 12px 12px 0; border-top: 1px solid var(--line);
+               font-size: 12px; }
+  .side-foot a { color: var(--accent); text-decoration: none; display: block; padding: 4px 0; }
+
+  main { flex: 1; min-width: 0; padding: 40px 48px 80px; }
+  .content { max-width: 780px; margin: 0 auto; }
+  .content h1 { font-size: 30px; letter-spacing: -.5px; margin: 0 0 6px; }
+  .content h2 { font-size: 21px; margin: 34px 0 10px; padding-top: 18px;
+                border-top: 1px solid var(--line); }
+  .content h3 { font-size: 16.5px; margin: 24px 0 8px; }
+  .content p, .content li { font-size: 14.5px; line-height: 1.65; color: var(--ink); }
+  .content p { margin: 10px 0; }
+  .content a { color: var(--accent); text-decoration: none; }
+  .content a:hover { text-decoration: underline; }
+  .content code { font-family: ui-monospace, "SF Mono", Consolas, monospace; font-size: 13px;
+                  background: var(--code-bg); border: 1px solid var(--line); border-radius: 6px;
+                  padding: 1.5px 6px; }
+  .content pre { position: relative; background: var(--code-bg); border: 1px solid var(--line);
+                 border-radius: var(--radius); padding: 14px 16px; overflow-x: auto; }
+  .content pre code { background: none; border: none; padding: 0; font-size: 13px; line-height: 1.55; }
+  .copy-btn { position: absolute; top: 8px; right: 8px; border: 1px solid var(--line);
+              background: var(--bg); color: var(--muted); font-size: 11.5px; font-weight: 600;
+              border-radius: 7px; padding: 4px 9px; cursor: pointer; opacity: 0; }
+  .content pre:hover .copy-btn { opacity: 1; }
+  .content table { border-collapse: collapse; width: 100%; margin: 14px 0; font-size: 13.5px; }
+  .content th { text-align: left; color: var(--muted); font-size: 12px; text-transform: uppercase;
+                letter-spacing: .4px; }
+  .content th, .content td { border: 1px solid var(--line); padding: 8px 11px;
+                             vertical-align: top; }
+  .content tr:nth-child(even) td { background: var(--side-bg); }
+  .content blockquote { border-left: 3px solid var(--accent); background: var(--accent-soft);
+                        margin: 14px 0; padding: 10px 16px; border-radius: 0 10px 10px 0; }
+  .content blockquote p { margin: 4px 0; }
+  .content hr { border: none; border-top: 1px solid var(--line); margin: 28px 0; }
+
+  .pager { display: flex; justify-content: space-between; gap: 12px; margin-top: 44px;
+           padding-top: 18px; border-top: 1px solid var(--line); }
+  .pager a { text-decoration: none; color: var(--ink); border: 1px solid var(--line);
+             border-radius: 10px; padding: 10px 16px; font-size: 13.5px; }
+  .pager a:hover { border-color: var(--accent); color: var(--accent); }
+  .pager span { display: block; font-size: 11px; color: var(--muted); text-transform: uppercase;
+                letter-spacing: .5px; }
+  .pager .next { margin-left: auto; text-align: right; }
+
+  .menu-btn { display: none; }
+  @media (max-width: 860px) {
+    aside { position: fixed; z-index: 20; left: 0; top: 0; bottom: 0; transform: translateX(-100%);
+            transition: transform .2s; }
+    aside.open { transform: none; }
+    main { padding: 24px 20px 60px; }
+    .menu-btn { display: block; position: fixed; z-index: 30; bottom: 18px; right: 18px;
+                width: 48px; height: 48px; border-radius: 50%; border: none; background: var(--accent);
+                color: #fff; font-size: 20px; cursor: pointer; box-shadow: 0 6px 18px rgba(0,0,0,.25); }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside id="sidebar">
+    <a class="side-brand" href="/">
+      <div class="mark">M</div>
+      <div class="name">Mpay <small>Documentation</small></div>
+    </a>
+    <div class="search">
+      <input id="search" type="search" placeholder="Search the docs…" autocomplete="off">
+      <div class="results" id="results"></div>
+    </div>
+    <nav>
+      {% for slug, label in nav %}<a href="/docs/{{ 'index' if slug == 'index' else slug }}"
+         class="{{ 'active' if slug == current }}">{{ label }}</a>{% endfor %}
+    </nav>
+    <div class="side-foot">
+      <a href="/api-docs" target="_blank" rel="noopener">API Explorer (OpenAPI) ↗</a>
+      <a href="https://github.com/mikky00B/Mpay" target="_blank" rel="noopener">GitHub ↗</a>
+    </div>
+  </aside>
+
+  <main>
+    <div class="content">
+      {{ content | safe }}
+      <div class="pager">
+        {% if prev %}<a href="/docs/{{ prev[0] }}"><span>Previous</span>{{ prev[1] }}</a>{% endif %}
+        {% if next %}<a class="next" href="/docs/{{ next[0] }}"><span>Next</span>{{ next[1] }}</a>{% endif %}
+      </div>
+    </div>
+  </main>
+</div>
+<button class="menu-btn" onclick="document.getElementById('sidebar').classList.toggle('open')">☰</button>
+
+<script>
+  // Copy buttons on every code block
+  document.querySelectorAll(".content pre").forEach(pre => {
+    const b = document.createElement("button");
+    b.className = "copy-btn"; b.textContent = "Copy";
+    b.onclick = () => navigator.clipboard.writeText(pre.querySelector("code").innerText)
+      .then(() => { b.textContent = "Copied ✓"; setTimeout(() => b.textContent = "Copy", 1500); });
+    pre.appendChild(b);
+  });
+
+  // Client-side search over all doc pages (index injected below)
+  const INDEX = {{ search_index | safe }};
+  const input = document.getElementById("search"), box = document.getElementById("results");
+  input.addEventListener("input", () => {
+    const q = input.value.trim().toLowerCase();
+    if (q.length < 2) { box.style.display = "none"; return; }
+    const hits = INDEX.map(p => {
+      const t = p.title.toLowerCase(), b = p.text;
+      const at = b.toLowerCase().indexOf(q);
+      const score = (t.includes(q) ? 100 : 0) + (at >= 0 ? 1 : 0);
+      const snippet = at >= 0 ? "…" + b.slice(Math.max(0, at - 40), at + 70).trim() + "…" : "";
+      return { p, score, snippet };
+    }).filter(h => h.score > 0).sort((a, b) => b.score - a.score).slice(0, 8);
+    box.innerHTML = hits.length ? hits.map(h =>
+      `<a href="/docs/${h.p.url === 'index' ? '' : h.p.url}"><div class="rt">${h.p.title}</div><div class="rs">${h.snippet}</div></a>`
+    ).join("") : `<a><div class="rt">No results for "${input.value}"</div></a>`;
+    box.style.display = "block";
+  });
+  document.addEventListener("click", e => {
+    if (!box.contains(e.target) && e.target !== input) box.style.display = "none";
+  });
+</script>
+</body>
+</html>

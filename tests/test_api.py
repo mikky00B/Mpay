@@ -380,6 +380,37 @@ def test_checkout_page_404_for_unknown_invoice(client):
     assert client.get("/pay/doesnotexist").status_code == 404
 
 
+# --------------------------------------------------------------------------
+# [D23] Live documentation site at /docs (Stripe/Paystack-style); OpenAPI
+# explorer relocated to /api-docs.
+# --------------------------------------------------------------------------
+
+def test_docs_site_serves_markdown_pages(client):
+    home = client.get("/docs")
+    assert home.status_code == 200
+    assert "Quickstart" in home.text          # sidebar nav rendered
+    assert 'href="/docs/quickstart"' in home.text
+
+    page = client.get("/docs/webhooks")
+    assert page.status_code == 200
+    assert "X-Mpay-Signature" in page.text    # markdown rendered to HTML
+
+    # relative .md links rewritten to served routes
+    assert 'href="/docs/quickstart"' in client.get("/docs/index").text
+
+
+def test_docs_site_whitelists_slugs(client):
+    assert client.get("/docs/not-a-page").status_code == 404
+    # no path traversal through the slug
+    assert client.get("/docs/..%2F.env").status_code == 404
+    assert client.get("/docs/..%2F..%2Fapp%2Fconfig.py").status_code == 404
+
+
+def test_openapi_explorer_moved_to_api_docs(client):
+    assert client.get("/docs").status_code == 200     # now the human docs site
+    assert client.get("/api-docs").status_code == 200  # Swagger UI lives here
+
+
 def test_checkout_qr_uri_carries_chain_id(client, merchant, db_url, monkeypatch):
     """EIP-681: WITHOUT @chainId the URI defaults to MAINNET — a Sepolia
     deployment's QR once silently pointed wallets at the wrong network.

@@ -104,7 +104,10 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Mpay", version="0.1.0", lifespan=lifespan)
+    # The human-facing documentation site lives at /docs; the interactive
+    # OpenAPI explorer is relocated to /api-docs (linked from the docs sidebar).
+    app = FastAPI(title="Mpay", version="0.1.0", lifespan=lifespan,
+                  docs_url="/api-docs")
     app.include_router(router)
 
     @app.get("/health")

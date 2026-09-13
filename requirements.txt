@@ -11,3 +11,4 @@ pytest>=8.0
 # Checkout page [D21]
 jinja2>=3.1
 segno>=1.6
+markdown>=3.5

@@ -1,6 +1,8 @@
 # API Reference
 
-Base URL: `http://your-host:8000`. All money values are exact decimal strings of USDC (6 decimals); internal amounts are integer base units. Interactive OpenAPI docs ship with the service at `/docs`.
+Base URL: `http://your-host:8000`. All money values are exact decimal strings of USDC (6 decimals); internal amounts are integer base units. An interactive OpenAPI explorer ships with the service at `/api-docs`.
+
+> These pages are also served live by every Mpay instance at **`/docs`** — sidebar navigation, full-text search, dark mode — so integrators always have docs matching the running version.
 
 Merchant-scoped endpoints require the `X-API-Key: mpay_sk_…` header issued at merchant creation. Public endpoints (`/invoices/{public_id}`, `/pay/{public_id}`, `/health`) are intentionally keyless — `public_id` is a 16-byte random capability.
 

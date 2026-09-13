@@ -20,11 +20,13 @@ Money crosses the API only as decimal strings [D4]; conversion is exact.
 from __future__ import annotations
 
 import base64
+import functools
 import hashlib
 import hmac
 import io
 import logging
 import os
+import re
 import secrets as _secrets
 from datetime import timedelta
 
@@ -59,6 +61,85 @@ router = APIRouter()
 templates = Jinja2Templates(
     directory=os.path.join(os.path.dirname(__file__), "templates")
 )
+
+# ------------------------------------------------------------------ docs site
+
+# The live documentation site (Stripe/Paystack-style) at /docs renders the
+# markdown sources in docs/ — one source of truth for repo + served site.
+DOCS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "docs")
+DOCS_ORDER = ["index", "quickstart", "api", "checkout", "webhooks", "operations", "brand"]
+DOCS_TITLES = {
+    "index": "Introduction",
+    "quickstart": "Quickstart",
+    "api": "API Reference",
+    "checkout": "Checkout & Payment Links",
+    "webhooks": "Webhooks",
+    "operations": "Operations",
+    "brand": "Brand",
+}
+_MD_DOC_LINK = re.compile(r"\]\(([^)#\s]+\.md)(#[^)\s]*)?\)")
+
+
+def _load_doc_html(slug: str) -> str:
+    import markdown as _markdown
+
+    with open(os.path.join(DOCS_DIR, f"{slug}.md"), encoding="utf-8") as f:
+        raw = f.read()
+    # Rewrite relative .md links to served /docs/ routes (anchors preserved).
+    raw = _MD_DOC_LINK.sub(lambda m: f"](/docs/{m.group(1)}{m.group(2) or ''})", raw)
+    return _markdown.markdown(raw, extensions=["fenced_code", "tables", "sane_lists"])
+
+
+@functools.lru_cache(maxsize=1)
+def _docs_search_index() -> str:
+    """JSON index of all doc pages for client-side search. Cached: docs are
+    static between deploys; the process restarts on release."""
+    import json as _json
+
+    pages = []
+    for slug in DOCS_ORDER:
+        with open(os.path.join(DOCS_DIR, f"{slug}.md"), encoding="utf-8") as f:
+            raw = f.read()
+        title = DOCS_TITLES[slug]
+        for line in raw.splitlines():
+            if line.startswith("# "):
+                title = line[2:].strip()
+                break
+        text = re.sub(r"[#*`>|_\[\]()]", " ", raw)
+        text = re.sub(r"\s+", " ", text).strip()
+        pages.append({"url": slug, "title": title, "text": text})
+    return _json.dumps(pages)
+
+
+def _render_doc(slug: str, request: Request) -> HTMLResponse:
+    idx = DOCS_ORDER.index(slug)
+    prev = (DOCS_ORDER[idx - 1], DOCS_TITLES[DOCS_ORDER[idx - 1]]) if idx > 0 else None
+    nxt = (DOCS_ORDER[idx + 1], DOCS_TITLES[DOCS_ORDER[idx + 1]]) if idx < len(DOCS_ORDER) - 1 else None
+    return templates.TemplateResponse(
+        request=request,
+        name="docs.html",
+        context={
+            "content": _load_doc_html(slug),
+            "nav": [(s, DOCS_TITLES[s]) for s in DOCS_ORDER],
+            "current": slug,
+            "title": DOCS_TITLES[slug],
+            "prev": prev,
+            "next": nxt,
+            "search_index": _docs_search_index(),
+        },
+    )
+
+
+@router.get("/docs", response_class=HTMLResponse)
+def docs_home(request: Request):
+    return _render_doc("index", request)
+
+
+@router.get("/docs/{slug}", response_class=HTMLResponse)
+def docs_page(slug: str, request: Request):
+    if slug not in DOCS_ORDER:  # whitelist = no path traversal, no odd slugs
+        raise HTTPException(404, "unknown documentation page")
+    return _render_doc(slug, request)
 
 
 def _iso_z(dt) -> str | None:
